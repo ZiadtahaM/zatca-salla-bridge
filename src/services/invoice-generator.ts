@@ -32,6 +32,41 @@ export function isB2bCustomer(taxNumber?: string | null): boolean {
   return /^[3][0-9]{13}[3]$/.test(clean);
 }
 
+export interface B2bAddressValidation {
+  isValid: boolean;
+  missingFields: string[];
+}
+
+export function validateB2bBuyerAddress(order: SallaOrderData): B2bAddressValidation {
+  const missingFields: string[] = [];
+  const taxNum = order.customer.tax_number?.trim();
+  if (!taxNum || !/^[3][0-9]{13}[3]$/.test(taxNum)) {
+    missingFields.push('buyer_tax_number_invalid');
+  }
+
+  const addr = order.shipping?.address;
+  if (!addr?.building_number || !/^\d{4}$/.test(addr.building_number.trim())) {
+    missingFields.push('building_number_4_digits');
+  }
+  if (!addr?.postal_code || !/^\d{5}$/.test(addr.postal_code.trim())) {
+    missingFields.push('postal_code_5_digits');
+  }
+  if (!addr?.street || addr.street.trim().length === 0) {
+    missingFields.push('street_name');
+  }
+  if (!addr?.district || addr.district.trim().length === 0) {
+    missingFields.push('district_subdivision');
+  }
+  if (!addr?.city || addr.city.trim().length === 0) {
+    missingFields.push('city_name');
+  }
+
+  return {
+    isValid: missingFields.length === 0,
+    missingFields
+  };
+}
+
 export function buildUblXmlFromSallaOrder(options: {
   order: SallaOrderData;
   uuid: string;
@@ -82,9 +117,48 @@ export function buildUblXmlFromSallaOrder(options: {
     </cac:Party>
   </cac:AccountingCustomerParty>`;
 
-  const subtotal = options.order.amounts.sub_total.amount.toFixed(2);
-  const taxTotal = options.order.amounts.tax.amount.amount.toFixed(2);
-  const grandTotal = options.order.amounts.total.amount.toFixed(2);
+  const discountAmount = options.order.amounts.discounts?.amount || 0;
+  const shippingAmount = options.order.amounts.shipping_cost?.amount || 0;
+  const codAmount = options.order.amounts.cash_on_delivery?.amount || 0;
+  const chargeAmount = shippingAmount + codAmount;
+
+  const lineExtensionTotal = options.order.amounts.sub_total.amount;
+  const allowanceTotal = discountAmount;
+  const chargeTotal = chargeAmount;
+  const taxExclusiveAmount = Number((lineExtensionTotal - allowanceTotal + chargeTotal).toFixed(2));
+  const declaredTaxTotal = options.order.amounts.tax.amount.amount;
+  const grandTotal = Number((taxExclusiveAmount + declaredTaxTotal).toFixed(2));
+
+  let allowanceChargeXml = '';
+  if (allowanceTotal > 0) {
+    allowanceChargeXml += `  <cac:AllowanceCharge>
+    <cbc:ChargeIndicator>false</cbc:ChargeIndicator>
+    <cbc:AllowanceChargeReason>Discount / تخفيض ترويجي</cbc:AllowanceChargeReason>
+    <cbc:Amount currencyID="SAR">${allowanceTotal.toFixed(2)}</cbc:Amount>
+    <cac:TaxCategory>
+      <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">S</cbc:ID>
+      <cbc:Percent>15.00</cbc:Percent>
+      <cac:TaxScheme>
+        <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5153">VAT</cbc:ID>
+      </cac:TaxScheme>
+    </cac:TaxCategory>
+  </cac:AllowanceCharge>\n`;
+  }
+
+  if (chargeTotal > 0) {
+    allowanceChargeXml += `  <cac:AllowanceCharge>
+    <cbc:ChargeIndicator>true</cbc:ChargeIndicator>
+    <cbc:AllowanceChargeReason>Shipping and Handling / رسوم الشحن والتوصيل</cbc:AllowanceChargeReason>
+    <cbc:Amount currencyID="SAR">${chargeTotal.toFixed(2)}</cbc:Amount>
+    <cac:TaxCategory>
+      <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">S</cbc:ID>
+      <cbc:Percent>15.00</cbc:Percent>
+      <cac:TaxScheme>
+        <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5153">VAT</cbc:ID>
+      </cac:TaxScheme>
+    </cac:TaxCategory>
+  </cac:AllowanceCharge>\n`;
+  }
 
   const linesXml = options.order.items
     .map((item: SallaOrderItem, index: number) => {
@@ -170,14 +244,14 @@ ${customerPartyBlock}
   <cac:PaymentMeans>
     <cbc:PaymentMeansCode>10</cbc:PaymentMeansCode>
   </cac:PaymentMeans>
-  <cac:TaxTotal>
-    <cbc:TaxAmount currencyID="SAR">${taxTotal}</cbc:TaxAmount>
+${allowanceChargeXml}  <cac:TaxTotal>
+    <cbc:TaxAmount currencyID="SAR">${declaredTaxTotal.toFixed(2)}</cbc:TaxAmount>
   </cac:TaxTotal>
   <cac:TaxTotal>
-    <cbc:TaxAmount currencyID="SAR">${taxTotal}</cbc:TaxAmount>
+    <cbc:TaxAmount currencyID="SAR">${declaredTaxTotal.toFixed(2)}</cbc:TaxAmount>
     <cac:TaxSubtotal>
-      <cbc:TaxableAmount currencyID="SAR">${subtotal}</cbc:TaxableAmount>
-      <cbc:TaxAmount currencyID="SAR">${taxTotal}</cbc:TaxAmount>
+      <cbc:TaxableAmount currencyID="SAR">${taxExclusiveAmount.toFixed(2)}</cbc:TaxableAmount>
+      <cbc:TaxAmount currencyID="SAR">${declaredTaxTotal.toFixed(2)}</cbc:TaxAmount>
       <cac:TaxCategory>
         <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">S</cbc:ID>
         <cbc:Percent>15.00</cbc:Percent>
@@ -188,12 +262,13 @@ ${customerPartyBlock}
     </cac:TaxSubtotal>
   </cac:TaxTotal>
   <cac:LegalMonetaryTotal>
-    <cbc:LineExtensionAmount currencyID="SAR">${subtotal}</cbc:LineExtensionAmount>
-    <cbc:TaxExclusiveAmount currencyID="SAR">${subtotal}</cbc:TaxExclusiveAmount>
-    <cbc:TaxInclusiveAmount currencyID="SAR">${grandTotal}</cbc:TaxInclusiveAmount>
-    <cbc:AllowanceTotalAmount currencyID="SAR">0.00</cbc:AllowanceTotalAmount>
+    <cbc:LineExtensionAmount currencyID="SAR">${lineExtensionTotal.toFixed(2)}</cbc:LineExtensionAmount>
+    <cbc:TaxExclusiveAmount currencyID="SAR">${taxExclusiveAmount.toFixed(2)}</cbc:TaxExclusiveAmount>
+    <cbc:TaxInclusiveAmount currencyID="SAR">${grandTotal.toFixed(2)}</cbc:TaxInclusiveAmount>
+    <cbc:AllowanceTotalAmount currencyID="SAR">${allowanceTotal.toFixed(2)}</cbc:AllowanceTotalAmount>
+    <cbc:ChargeTotalAmount currencyID="SAR">${chargeTotal.toFixed(2)}</cbc:ChargeTotalAmount>
     <cbc:PrepaidAmount currencyID="SAR">0.00</cbc:PrepaidAmount>
-    <cbc:PayableAmount currencyID="SAR">${grandTotal}</cbc:PayableAmount>
+    <cbc:PayableAmount currencyID="SAR">${grandTotal.toFixed(2)}</cbc:PayableAmount>
   </cac:LegalMonetaryTotal>
 ${linesXml}
 </Invoice>`;
@@ -252,9 +327,48 @@ export function buildUblCreditNoteXmlFromSallaRefund(options: {
     </cac:Party>
   </cac:AccountingCustomerParty>`;
 
-  const subtotal = options.order.amounts.sub_total.amount.toFixed(2);
-  const taxTotal = options.order.amounts.tax.amount.amount.toFixed(2);
-  const grandTotal = options.order.amounts.total.amount.toFixed(2);
+  const discountAmount = options.order.amounts.discounts?.amount || 0;
+  const shippingAmount = options.order.amounts.shipping_cost?.amount || 0;
+  const codAmount = options.order.amounts.cash_on_delivery?.amount || 0;
+  const chargeAmount = shippingAmount + codAmount;
+
+  const lineExtensionTotal = options.order.amounts.sub_total.amount;
+  const allowanceTotal = discountAmount;
+  const chargeTotal = chargeAmount;
+  const taxExclusiveAmount = Number((lineExtensionTotal - allowanceTotal + chargeTotal).toFixed(2));
+  const declaredTaxTotal = options.order.amounts.tax.amount.amount;
+  const grandTotal = Number((taxExclusiveAmount + declaredTaxTotal).toFixed(2));
+
+  let allowanceChargeXml = '';
+  if (allowanceTotal > 0) {
+    allowanceChargeXml += `  <cac:AllowanceCharge>
+    <cbc:ChargeIndicator>false</cbc:ChargeIndicator>
+    <cbc:AllowanceChargeReason>Discount / تخفيض ترويجي</cbc:AllowanceChargeReason>
+    <cbc:Amount currencyID="SAR">${allowanceTotal.toFixed(2)}</cbc:Amount>
+    <cac:TaxCategory>
+      <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">S</cbc:ID>
+      <cbc:Percent>15.00</cbc:Percent>
+      <cac:TaxScheme>
+        <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5153">VAT</cbc:ID>
+      </cac:TaxScheme>
+    </cac:TaxCategory>
+  </cac:AllowanceCharge>\n`;
+  }
+
+  if (chargeTotal > 0) {
+    allowanceChargeXml += `  <cac:AllowanceCharge>
+    <cbc:ChargeIndicator>true</cbc:ChargeIndicator>
+    <cbc:AllowanceChargeReason>Shipping and Handling / رسوم الشحن والتوصيل</cbc:AllowanceChargeReason>
+    <cbc:Amount currencyID="SAR">${chargeTotal.toFixed(2)}</cbc:Amount>
+    <cac:TaxCategory>
+      <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">S</cbc:ID>
+      <cbc:Percent>15.00</cbc:Percent>
+      <cac:TaxScheme>
+        <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5153">VAT</cbc:ID>
+      </cac:TaxScheme>
+    </cac:TaxCategory>
+  </cac:AllowanceCharge>\n`;
+  }
 
   const linesXml = options.order.items
     .map((item: SallaOrderItem, index: number) => {
@@ -346,14 +460,14 @@ ${customerPartyBlock}
     <cbc:PaymentMeansCode>10</cbc:PaymentMeansCode>
     <cbc:InstructionNote>${options.returnReason.normalize('NFC')}</cbc:InstructionNote>
   </cac:PaymentMeans>
-  <cac:TaxTotal>
-    <cbc:TaxAmount currencyID="SAR">${taxTotal}</cbc:TaxAmount>
+${allowanceChargeXml}  <cac:TaxTotal>
+    <cbc:TaxAmount currencyID="SAR">${declaredTaxTotal.toFixed(2)}</cbc:TaxAmount>
   </cac:TaxTotal>
   <cac:TaxTotal>
-    <cbc:TaxAmount currencyID="SAR">${taxTotal}</cbc:TaxAmount>
+    <cbc:TaxAmount currencyID="SAR">${declaredTaxTotal.toFixed(2)}</cbc:TaxAmount>
     <cac:TaxSubtotal>
-      <cbc:TaxableAmount currencyID="SAR">${subtotal}</cbc:TaxableAmount>
-      <cbc:TaxAmount currencyID="SAR">${taxTotal}</cbc:TaxAmount>
+      <cbc:TaxableAmount currencyID="SAR">${taxExclusiveAmount.toFixed(2)}</cbc:TaxableAmount>
+      <cbc:TaxAmount currencyID="SAR">${declaredTaxTotal.toFixed(2)}</cbc:TaxAmount>
       <cac:TaxCategory>
         <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">S</cbc:ID>
         <cbc:Percent>15.00</cbc:Percent>
@@ -364,12 +478,13 @@ ${customerPartyBlock}
     </cac:TaxSubtotal>
   </cac:TaxTotal>
   <cac:LegalMonetaryTotal>
-    <cbc:LineExtensionAmount currencyID="SAR">${subtotal}</cbc:LineExtensionAmount>
-    <cbc:TaxExclusiveAmount currencyID="SAR">${subtotal}</cbc:TaxExclusiveAmount>
-    <cbc:TaxInclusiveAmount currencyID="SAR">${grandTotal}</cbc:TaxInclusiveAmount>
-    <cbc:AllowanceTotalAmount currencyID="SAR">0.00</cbc:AllowanceTotalAmount>
+    <cbc:LineExtensionAmount currencyID="SAR">${lineExtensionTotal.toFixed(2)}</cbc:LineExtensionAmount>
+    <cbc:TaxExclusiveAmount currencyID="SAR">${taxExclusiveAmount.toFixed(2)}</cbc:TaxExclusiveAmount>
+    <cbc:TaxInclusiveAmount currencyID="SAR">${grandTotal.toFixed(2)}</cbc:TaxInclusiveAmount>
+    <cbc:AllowanceTotalAmount currencyID="SAR">${allowanceTotal.toFixed(2)}</cbc:AllowanceTotalAmount>
+    <cbc:ChargeTotalAmount currencyID="SAR">${chargeTotal.toFixed(2)}</cbc:ChargeTotalAmount>
     <cbc:PrepaidAmount currencyID="SAR">0.00</cbc:PrepaidAmount>
-    <cbc:PayableAmount currencyID="SAR">${grandTotal}</cbc:PayableAmount>
+    <cbc:PayableAmount currencyID="SAR">${grandTotal.toFixed(2)}</cbc:PayableAmount>
   </cac:LegalMonetaryTotal>
 ${linesXml}
 </Invoice>`;
@@ -425,6 +540,18 @@ export async function processSallaOrderIntoZatcaInvoice(
       isB2C
     });
 
+    const discountAmount = order.amounts.discounts?.amount || 0;
+    const shippingAmount = order.amounts.shipping_cost?.amount || 0;
+    const codAmount = order.amounts.cash_on_delivery?.amount || 0;
+    const chargeAmount = shippingAmount + codAmount;
+
+    const lineExtensionTotal = order.amounts.sub_total.amount;
+    const allowanceTotal = discountAmount;
+    const chargeTotal = chargeAmount;
+    const taxExclusiveAmount = Number((lineExtensionTotal - allowanceTotal + chargeTotal).toFixed(2));
+    const declaredTaxTotal = order.amounts.tax.amount.amount;
+    const grandTotal = Number((taxExclusiveAmount + declaredTaxTotal).toFixed(2));
+
     const privateKeyPem = decryptVaultSecret(egs.private_key_pem);
 
     const signed: SignOutput = signZatcaInvoiceExact({
@@ -433,8 +560,8 @@ export async function processSallaOrderIntoZatcaInvoice(
       certPem: egs.certificate,
       sellerNameArabic: 'شركة رواء للملابس الفاخرة',
       sellerVatNumber: '300075588700003',
-      grandTotal: order.amounts.total.amount.toFixed(2),
-      vatTotal: order.amounts.tax.amount.amount.toFixed(2),
+      grandTotal: grandTotal.toFixed(2),
+      vatTotal: declaredTaxTotal.toFixed(2),
       issueDateTimeIsoZ,
       isB2C
     });
@@ -462,9 +589,9 @@ export async function processSallaOrderIntoZatcaInvoice(
         signed.signedXml,
         issueDate,
         issueDateTimeIsoZ,
-        order.amounts.sub_total.amount,
-        order.amounts.tax.amount.amount,
-        order.amounts.total.amount
+        lineExtensionTotal,
+        declaredTaxTotal,
+        grandTotal
       ]
     );
 
@@ -558,6 +685,18 @@ export async function processSallaRefundIntoZatcaCreditNote(
       isB2C
     });
 
+    const discountAmount = order.amounts.discounts?.amount || 0;
+    const shippingAmount = order.amounts.shipping_cost?.amount || 0;
+    const codAmount = order.amounts.cash_on_delivery?.amount || 0;
+    const chargeAmount = shippingAmount + codAmount;
+
+    const lineExtensionTotal = order.amounts.sub_total.amount;
+    const allowanceTotal = discountAmount;
+    const chargeTotal = chargeAmount;
+    const taxExclusiveAmount = Number((lineExtensionTotal - allowanceTotal + chargeTotal).toFixed(2));
+    const declaredTaxTotal = order.amounts.tax.amount.amount;
+    const grandTotal = Number((taxExclusiveAmount + declaredTaxTotal).toFixed(2));
+
     const privateKeyPem = decryptVaultSecret(egs.private_key_pem);
 
     const signed = signZatcaInvoiceExact({
@@ -566,8 +705,8 @@ export async function processSallaRefundIntoZatcaCreditNote(
       certPem: egs.certificate,
       sellerNameArabic: 'شركة رواء للملابس الفاخرة',
       sellerVatNumber: '300075588700003',
-      grandTotal: order.amounts.total.amount.toFixed(2),
-      vatTotal: order.amounts.tax.amount.amount.toFixed(2),
+      grandTotal: grandTotal.toFixed(2),
+      vatTotal: declaredTaxTotal.toFixed(2),
       issueDateTimeIsoZ,
       isB2C
     });
@@ -596,9 +735,9 @@ export async function processSallaRefundIntoZatcaCreditNote(
         issueDate,
         issueDateTimeIsoZ,
         originalInvoice.id,
-        order.amounts.sub_total.amount,
-        order.amounts.tax.amount.amount,
-        order.amounts.total.amount
+        lineExtensionTotal,
+        declaredTaxTotal,
+        grandTotal
       ]
     );
 

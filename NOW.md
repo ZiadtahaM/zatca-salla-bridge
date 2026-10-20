@@ -20,6 +20,12 @@ Production-grade ZATCA Phase 2 resilient e-invoicing bridge for Saudi merchants 
 - [x] Multi-Branch and Retail POS Isolation: Separate EGS stamp units and isolated monotonic hash chains mapped per terminal and branch location.
 - [x] Automated CSID Renewal and Expiry Tracking: 7-day proactive warning worker with bilingual Arabic/English merchant alerts.
 - [x] Dead Letter Queue (DLQ) Backpressure Monitor: 30-minute stall detection and 24-hour statutory deadline alert escalation.
-- [x] 22/22 tests passing across 6 test suites with exit code 0.
-- [x] Unanimous PASS verdicts from 5 independent zero-context subagents.
+- [x] Gate 1: Salla OAuth2 Handshake (`POST /webhooks/salla/authorize`) with AES-256-GCM encrypted `merchant_tokens` vault and store info REST client.
+- [x] Gate 2: Salla promo discounts, shipping costs, and COD fees serialized into `<cac:AllowanceCharge>` with `BR-CO-10` and `BR-CO-15` tax reconciliation.
+- [x] Gate 3: B2B Corporate Buyer Hold Queue (`pending_b2b_orders` / `pending_b2b_enrichment`) and `POST /api/b2b/orders/:orderId/enrich` preventing premature ICV allocation.
+- [x] Gate 4: COD and Bank Transfer payment gate deferring invoice signing until `completed` or `delivered` status.
+- [x] Gate 5: Bilingual PDF/A-3 Tax Invoice generator (`GET /api/invoices/:id/pdf` and `/printable`) with embedded `ZATCA_eInvoice.xml` (`AFRelationship /Alternative`) and TLV QR payload.
+- [x] Quirk 1 & Quirk 2: Cloudflare-safe outbound Fatoora headers and post-timeout HTTP 409 Conflict (`duplicate_uuid_recovered`) idempotent recovery.
+- [x] 28/28 tests passing across 7 test suites with exit code 0.
+- [x] Unanimous PASS verdicts from independent zero-context subagents.
 - [x] Clean TypeScript build (tsc) with 0 diagnostic errors.

@@ -118,7 +118,8 @@ export async function onboardEgsUnit(
     finalSecret = pcsidRes.secret;
   }
 
-  const certPem = `-----BEGIN CERTIFICATE-----\n${finalCertBase64}\n-----END CERTIFICATE-----`;
+  const wrappedCertBase64 = (finalCertBase64.replace(/\s+/g, '').match(/.{1,64}/g) || []).join('\n');
+  const certPem = `-----BEGIN CERTIFICATE-----\n${wrappedCertBase64}\n-----END CERTIFICATE-----\n`;
   const x509 = new X509Certificate(certPem);
   const certMeta = extractX509Metadata(certPem);
 

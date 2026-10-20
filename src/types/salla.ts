@@ -57,6 +57,8 @@ export const SallaOrderDataSchema = z.object({
   amounts: z.object({
     sub_total: SallaItemAmountSchema,
     shipping_cost: SallaItemAmountSchema.optional().nullable(),
+    cash_on_delivery: SallaItemAmountSchema.optional().nullable(),
+    discounts: SallaItemAmountSchema.optional().nullable(),
     tax: z.object({
       amount: SallaItemAmountSchema,
       percent: z.number().default(15)

@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -182,4 +182,367 @@ export function buildCompliantUblTemplate(options: {
     </cac:Price>
   </cac:InvoiceLine>
 </Invoice>`;
+}
+
+export function attachStatefulRelationalTestDb(pool: any): void {
+  const merchantTokens: any[] = [];
+  const egsUnits: any[] = [];
+  const invoices: any[] = [];
+  const pendingB2bOrders: any[] = [];
+
+  const executeQuery = async (sql: string, params: any[] = []): Promise<{ rows: any[]; rowCount: number }> => {
+    const normalized = sql.replace(/\s+/g, ' ').trim();
+
+    if (normalized === 'BEGIN' || normalized === 'COMMIT' || normalized === 'ROLLBACK') {
+      return { rows: [], rowCount: 0 };
+    }
+
+    if (normalized.includes('INSERT INTO merchant_tokens')) {
+      const [merchant_id, access_token_encrypted, refresh_token_encrypted, expires_at, token_scope] = params;
+      if (!String(access_token_encrypted).startsWith('v1:') || !String(refresh_token_encrypted).startsWith('v1:')) {
+        throw new Error('new row for relation "merchant_tokens" violates check constraint "chk_merchant_access_token"');
+      }
+      const existing = merchantTokens.find((t) => t.merchant_id === merchant_id);
+      if (existing) {
+        existing.access_token_encrypted = access_token_encrypted;
+        existing.refresh_token_encrypted = refresh_token_encrypted;
+        existing.expires_at = expires_at;
+        existing.token_scope = token_scope;
+        existing.updated_at = new Date();
+      } else {
+        merchantTokens.push({
+          id: randomUUID(),
+          merchant_id,
+          access_token_encrypted,
+          refresh_token_encrypted,
+          expires_at,
+          token_scope,
+          created_at: new Date(),
+          updated_at: new Date()
+        });
+      }
+      return { rows: [], rowCount: 1 };
+    }
+
+    if (normalized.includes('FROM merchant_tokens WHERE merchant_id = $1')) {
+      const rows = merchantTokens.filter((t) => t.merchant_id === params[0]);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('INSERT INTO egs_units')) {
+      const [
+        merchant_id,
+        branch_id,
+        salla_branch_id,
+        terminal_id,
+        egs_uuid,
+        custom_id,
+        model,
+        csid_environment,
+        certificate,
+        certificate_hash,
+        public_key_bytes,
+        ca_signature_bytes,
+        private_key_pem,
+        csid_secret,
+        current_icv,
+        last_document_hash,
+        expires_at
+      ] = params;
+
+      if (!String(private_key_pem).startsWith('v1:') || !String(csid_secret).startsWith('v1:')) {
+        throw new Error('new row for relation "egs_units" violates check constraint "chk_egs_encrypted_key"');
+      }
+
+      let unit = egsUnits.find(
+        (u) => u.merchant_id === merchant_id && u.branch_id === branch_id && u.custom_id === custom_id
+      );
+      if (unit) {
+        Object.assign(unit, {
+          salla_branch_id,
+          terminal_id,
+          certificate,
+          certificate_hash,
+          public_key_bytes,
+          ca_signature_bytes,
+          private_key_pem,
+          csid_secret,
+          expires_at,
+          csid_environment,
+          updated_at: new Date()
+        });
+      } else {
+        unit = {
+          id: randomUUID(),
+          merchant_id,
+          branch_id,
+          salla_branch_id,
+          terminal_id,
+          egs_uuid,
+          custom_id,
+          model,
+          csid_environment,
+          certificate,
+          certificate_hash,
+          public_key_bytes,
+          ca_signature_bytes,
+          private_key_pem,
+          csid_secret,
+          current_icv: Number(current_icv),
+          last_document_hash,
+          expires_at,
+          is_active: true,
+          created_at: new Date(),
+          updated_at: new Date()
+        };
+        egsUnits.push(unit);
+      }
+      return { rows: [{ id: unit.id }], rowCount: 1 };
+    }
+
+    if (normalized.includes('FROM egs_units') && normalized.includes('WHERE id = $1')) {
+      const rows = egsUnits.filter((u) => u.id === params[0]);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('SELECT certificate FROM egs_units WHERE is_active = TRUE')) {
+      const rows = egsUnits.filter((u) => u.is_active).slice(0, 1);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('FROM egs_units WHERE merchant_id = $1 AND salla_branch_id = $2 AND terminal_id = $3')) {
+      const rows = egsUnits
+        .filter(
+          (u) =>
+            u.merchant_id === params[0] &&
+            u.salla_branch_id === params[1] &&
+            u.terminal_id === params[2] &&
+            u.is_active
+        )
+        .slice(0, 1);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('FROM egs_units WHERE merchant_id = $1 AND salla_branch_id = $2')) {
+      const rows = egsUnits
+        .filter((u) => u.merchant_id === params[0] && u.salla_branch_id === params[1] && u.is_active)
+        .slice(0, 1);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('FROM egs_units WHERE merchant_id = $1 AND is_active = TRUE')) {
+      const rows = egsUnits.filter((u) => u.merchant_id === params[0] && u.is_active).slice(0, 1);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('UPDATE egs_units SET current_icv = $1')) {
+      const unit = egsUnits.find((u) => u.id === params[2]);
+      if (unit) {
+        unit.current_icv = Number(params[0]);
+        unit.last_document_hash = params[1];
+        unit.updated_at = new Date();
+      }
+      return { rows: [], rowCount: unit ? 1 : 0 };
+    }
+
+    if (normalized.includes('FROM invoices WHERE idempotency_key = $1')) {
+      const rows = invoices.filter((i) => i.idempotency_key === params[0]);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('FROM invoices WHERE order_id = $1 AND egs_unit_id = $2')) {
+      const rows = invoices
+        .filter(
+          (i) =>
+            String(i.order_id) === String(params[0]) &&
+            i.egs_unit_id === params[1] &&
+            ['simplified_tax_invoice', 'tax_invoice'].includes(i.invoice_type)
+        )
+        .slice(-1);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('FROM invoices WHERE order_id = $1 AND invoice_type IN')) {
+      const rows = invoices
+        .filter(
+          (i) =>
+            String(i.order_id) === String(params[0]) &&
+            ['simplified_tax_invoice', 'tax_invoice'].includes(i.invoice_type)
+        )
+        .slice(-1);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('INSERT INTO invoices')) {
+      const id = randomUUID();
+      if (normalized.includes("'credit_note'")) {
+        const [
+          egs_unit_id,
+          order_id,
+          idempotency_key,
+          uuid,
+          icv,
+          pih,
+          invoice_hash,
+          qr_code_payload,
+          signed_xml,
+          supply_date,
+          issue_timestamp,
+          replaces_invoice_id,
+          subtotal,
+          tax_total,
+          grand_total
+        ] = params;
+        invoices.push({
+          id,
+          egs_unit_id,
+          order_id: String(order_id),
+          idempotency_key,
+          invoice_type: 'credit_note',
+          uuid,
+          icv: Number(icv),
+          pih,
+          invoice_hash,
+          qr_code_payload,
+          signed_xml,
+          cleared_xml: null,
+          status: 'signed',
+          supply_date,
+          issue_timestamp,
+          replaces_invoice_id,
+          subtotal,
+          tax_total,
+          grand_total,
+          currency: 'SAR',
+          created_at: new Date(),
+          updated_at: new Date()
+        });
+      } else {
+        const [
+          egs_unit_id,
+          order_id,
+          idempotency_key,
+          invoice_type,
+          uuid,
+          icv,
+          pih,
+          invoice_hash,
+          qr_code_payload,
+          signed_xml,
+          supply_date,
+          issue_timestamp,
+          subtotal,
+          tax_total,
+          grand_total
+        ] = params;
+        invoices.push({
+          id,
+          egs_unit_id,
+          order_id: String(order_id),
+          idempotency_key,
+          invoice_type,
+          uuid,
+          icv: Number(icv),
+          pih,
+          invoice_hash,
+          qr_code_payload,
+          signed_xml,
+          cleared_xml: null,
+          status: 'signed',
+          supply_date,
+          issue_timestamp,
+          replaces_invoice_id: null,
+          subtotal,
+          tax_total,
+          grand_total,
+          currency: 'SAR',
+          created_at: new Date(),
+          updated_at: new Date()
+        });
+      }
+      return { rows: [{ id }], rowCount: 1 };
+    }
+
+    if (normalized.includes('FROM invoices') && (normalized.includes('WHERE id = $1') || normalized.includes('WHERE i.id = $1'))) {
+      const inv = invoices.find((i) => i.id === params[0]);
+      if (!inv) {
+        return { rows: [], rowCount: 0 };
+      }
+      const unit = egsUnits.find((u) => u.id === inv.egs_unit_id);
+      return {
+        rows: [
+          {
+            ...inv,
+            merchant_id: unit?.merchant_id,
+            branch_id: unit?.branch_id
+          }
+        ],
+        rowCount: 1
+      };
+    }
+
+    if (normalized.includes('INSERT INTO pending_b2b_orders')) {
+      const [
+        merchant_id,
+        order_id,
+        idempotency_key,
+        egs_unit_id,
+        buyer_vat,
+        buyer_name,
+        order_payload_str,
+        missing_fields_str
+      ] = params;
+      const order_payload = typeof order_payload_str === 'string' ? JSON.parse(order_payload_str) : order_payload_str;
+      const missing_fields = typeof missing_fields_str === 'string' ? JSON.parse(missing_fields_str) : missing_fields_str;
+
+      let row = pendingB2bOrders.find((p) => p.idempotency_key === idempotency_key);
+      if (row) {
+        row.order_payload = order_payload;
+        row.missing_fields = missing_fields;
+        row.updated_at = new Date();
+      } else {
+        row = {
+          id: randomUUID(),
+          merchant_id,
+          order_id: String(order_id),
+          idempotency_key,
+          egs_unit_id,
+          buyer_vat,
+          buyer_name,
+          order_payload,
+          missing_fields,
+          status: 'pending_enrichment',
+          created_at: new Date(),
+          updated_at: new Date()
+        };
+        pendingB2bOrders.push(row);
+      }
+      return { rows: [{ id: row.id }], rowCount: 1 };
+    }
+
+    if (normalized.includes('FROM pending_b2b_orders WHERE order_id = $1')) {
+      const rows = pendingB2bOrders
+        .filter((p) => String(p.order_id) === String(params[0]) && p.status === 'pending_enrichment')
+        .slice(-1);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes("UPDATE pending_b2b_orders SET status = 'enriched_and_signed'")) {
+      const row = pendingB2bOrders.find((p) => p.id === params[0]);
+      if (row) {
+        row.status = 'enriched_and_signed';
+        row.updated_at = new Date();
+      }
+      return { rows: [], rowCount: row ? 1 : 0 };
+    }
+
+    return { rows: [], rowCount: 0 };
+  };
+
+  pool.query = executeQuery;
+  pool.connect = async () => ({
+    query: executeQuery,
+    release: () => {}
+  });
+  pool.end = async () => {};
 }

@@ -1,11 +1,70 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { SallaWebhookPayloadSchema, SallaWebhookPayload } from '../types/salla.js';
+import { SallaWebhookPayloadSchema, SallaWebhookPayload, SallaOrderData } from '../types/salla.js';
 import { verifySallaWebhookSignature } from '../services/webhook-verifier.js';
 import { pool } from '../storage/db.js';
-import { processSallaOrderIntoZatcaInvoice, processSallaRefundIntoZatcaCreditNote } from '../services/invoice-generator.js';
+import {
+  processSallaOrderIntoZatcaInvoice,
+  processSallaRefundIntoZatcaCreditNote,
+  isB2bCustomer,
+  validateB2bBuyerAddress
+} from '../services/invoice-generator.js';
 import { resolveEgsUnitForOrder } from '../services/branch-router.js';
+import { storeSallaMerchantTokens, getSallaMerchantTokens } from '../services/salla-oauth.js';
 
 export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void> {
+  fastify.post('/webhooks/salla/authorize', async (request: FastifyRequest, reply: FastifyReply) => {
+    const body = (request.body || {}) as any;
+    const data = body.data || body;
+
+    const merchantId = (body.merchant || data.merchant || body.merchant_id || data.merchant_id || '').toString().trim();
+    const accessToken = (data.access_token || body.access_token || '').toString().trim();
+    const refreshToken = (data.refresh_token || body.refresh_token || '').toString().trim();
+    const expiresIn = Number(data.expires || data.expires_in || body.expires || body.expires_in || 1209600);
+    const scope = (data.scope || body.scope || 'offline_access').toString();
+
+    if (!merchantId || !accessToken || !refreshToken) {
+      return reply.status(400).send({
+        error: 'Missing required Salla OAuth fields (merchant, access_token, refresh_token)'
+      });
+    }
+
+    const client = await pool.connect();
+    try {
+      await storeSallaMerchantTokens(client, {
+        merchantId,
+        accessToken,
+        refreshToken,
+        expiresIn,
+        scope
+      });
+
+      return reply.status(200).send({
+        status: 'authorized',
+        merchant_id: merchantId
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  fastify.get('/api/salla/merchants/:merchantId/tokens', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { merchantId } = request.params as { merchantId: string };
+    const client = await pool.connect();
+    try {
+      const tokens = await getSallaMerchantTokens(client, merchantId);
+      if (!tokens) {
+        return reply.status(404).send({ error: `No OAuth tokens found for merchant ${merchantId}` });
+      }
+      return reply.status(200).send({
+        merchant_id: tokens.merchantId,
+        expires_at: tokens.expiresAt.toISOString(),
+        scope: tokens.scope
+      });
+    } finally {
+      client.release();
+    }
+  });
+
   fastify.post('/webhooks/salla', async (request: FastifyRequest, reply: FastifyReply) => {
     const rawBodyBuffer = (request as any).rawBody as Buffer | undefined;
 
@@ -82,6 +141,86 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
 
       const egsUnitId = resolvedUnit.id;
 
+      if (isOrderUpsert) {
+        const existingOrderInvoice = await client.query(
+          `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status 
+           FROM invoices 
+           WHERE order_id = $1 AND egs_unit_id = $2
+             AND invoice_type IN ('simplified_tax_invoice', 'tax_invoice')
+           ORDER BY created_at DESC LIMIT 1`,
+          [orderId, egsUnitId]
+        );
+
+        if (existingOrderInvoice.rows.length > 0) {
+          const inv = existingOrderInvoice.rows[0];
+          return reply.status(200).send({
+            status: 'idempotent_replay',
+            invoice_id: inv.id,
+            invoice_uuid: inv.uuid,
+            icv: inv.icv,
+            invoice_hash: inv.invoice_hash,
+            qr_code: inv.qr_code_payload,
+            invoice_status: inv.status
+          });
+        }
+
+        const paymentMethod = payload.data.payment_method?.toLowerCase() || '';
+        const statusSlug = payload.data.status.slug?.toLowerCase() || '';
+        const isDeferredPaymentMethod = ['cod', 'cash_on_delivery', 'bank', 'bank_transfer'].includes(paymentMethod);
+        const isFinalizedStatus = ['completed', 'delivered'].includes(statusSlug);
+
+        if (isDeferredPaymentMethod && !isFinalizedStatus) {
+          return reply.status(200).send({
+            status: 'deferred_payment_hold',
+            order_id: orderId,
+            payment_method: payload.data.payment_method,
+            order_status: payload.data.status.slug,
+            reason: 'COD and Bank Transfer orders are deferred until status reaches completed or delivered'
+          });
+        }
+
+        if (isB2bCustomer(payload.data.customer.tax_number)) {
+          const validation = validateB2bBuyerAddress(payload.data);
+          if (!validation.isValid) {
+            const buyerVat = payload.data.customer.tax_number!.trim();
+            const buyerName = (
+              payload.data.customer.company_name ||
+              `${payload.data.customer.first_name} ${payload.data.customer.last_name || ''}`
+            ).trim();
+
+            const pendingRes = await client.query(
+              `INSERT INTO pending_b2b_orders (
+                merchant_id, order_id, idempotency_key, egs_unit_id,
+                buyer_vat, buyer_name, order_payload, missing_fields, status
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, 'pending_enrichment')
+              ON CONFLICT (idempotency_key) DO UPDATE SET
+                missing_fields = EXCLUDED.missing_fields,
+                order_payload = EXCLUDED.order_payload,
+                updated_at = NOW()
+              RETURNING id`,
+              [
+                merchantId,
+                orderId,
+                idempotencyKey,
+                egsUnitId,
+                buyerVat,
+                buyerName,
+                JSON.stringify(payload.data),
+                JSON.stringify(validation.missingFields)
+              ]
+            );
+
+            return reply.status(200).send({
+              status: 'pending_b2b_enrichment',
+              pending_id: pendingRes.rows[0].id,
+              order_id: orderId,
+              missing_fields: validation.missingFields,
+              enrichment_url: `/api/b2b/orders/${orderId}/enrich`
+            });
+          }
+        }
+      }
+
       let result;
       if (isRefundOrCancel) {
         result = await processSallaRefundIntoZatcaCreditNote(
@@ -111,6 +250,96 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
         is_b2c: result.isB2C,
         document_type: isRefundOrCancel ? 'credit_note' : (result.isB2C ? 'simplified_tax_invoice' : 'tax_invoice'),
         zatca_status: result.isB2C ? 'ready_for_reporting_24h' : 'queued_for_clearance'
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  fastify.post('/api/b2b/orders/:orderId/enrich', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { orderId } = request.params as { orderId: string };
+    const body = (request.body || {}) as {
+      building_number?: string;
+      postal_code?: string;
+      street?: string;
+      district?: string;
+      city?: string;
+      company_name?: string;
+    };
+
+    const client = await pool.connect();
+    try {
+      const pendingRes = await client.query(
+        `SELECT id, merchant_id, order_id, idempotency_key, egs_unit_id, order_payload, status
+         FROM pending_b2b_orders
+         WHERE order_id = $1 AND status = 'pending_enrichment'
+         ORDER BY created_at DESC LIMIT 1`,
+        [orderId]
+      );
+
+      if (pendingRes.rows.length === 0) {
+        return reply.status(404).send({
+          error: `No pending B2B order awaiting enrichment found for order_id: ${orderId}`
+        });
+      }
+
+      const pendingRow = pendingRes.rows[0];
+      const rawOrder: SallaOrderData =
+        typeof pendingRow.order_payload === 'string'
+          ? JSON.parse(pendingRow.order_payload)
+          : pendingRow.order_payload;
+
+      const existingAddress = rawOrder.shipping?.address || { country: 'SA', city: 'Riyadh' };
+      const updatedOrder: SallaOrderData = {
+        ...rawOrder,
+        customer: {
+          ...rawOrder.customer,
+          company_name: body.company_name !== undefined ? body.company_name : rawOrder.customer.company_name
+        },
+        shipping: {
+          ...(rawOrder.shipping || {}),
+          address: {
+            ...existingAddress,
+            building_number: body.building_number !== undefined ? body.building_number : existingAddress.building_number,
+            postal_code: body.postal_code !== undefined ? body.postal_code : existingAddress.postal_code,
+            street: body.street !== undefined ? body.street : existingAddress.street,
+            district: body.district !== undefined ? body.district : existingAddress.district,
+            city: body.city !== undefined ? body.city : existingAddress.city
+          }
+        }
+      };
+
+      const validation = validateB2bBuyerAddress(updatedOrder);
+      if (!validation.isValid) {
+        return reply.status(400).send({
+          error: 'Incomplete B2B national address',
+          missing_fields: validation.missingFields
+        });
+      }
+
+      const result = await processSallaOrderIntoZatcaInvoice(
+        client,
+        pendingRow.egs_unit_id,
+        updatedOrder,
+        `${pendingRow.idempotency_key}:enriched`
+      );
+
+      await client.query(
+        `UPDATE pending_b2b_orders
+         SET status = 'enriched_and_signed',
+             updated_at = NOW()
+         WHERE id = $1`,
+        [pendingRow.id]
+      );
+
+      return reply.status(200).send({
+        status: 'enriched_and_signed',
+        order_id: orderId,
+        invoice_id: result.invoiceId,
+        invoice_uuid: result.invoiceUuid,
+        icv: result.icv,
+        invoice_hash: result.invoiceHash,
+        qr_code: result.qrCodeBase64
       });
     } finally {
       client.release();

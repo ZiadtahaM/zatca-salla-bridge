@@ -1,8 +1,0 @@
-[req]
-prompt = no
-distinguished_name = dn
-[dn]
-C = SA
-OU = Riyadh Branch
-O = Al-Riyadh Trading Co
-CN = TS-EGS-001

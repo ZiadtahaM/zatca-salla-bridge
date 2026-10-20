@@ -10,7 +10,22 @@ export type GatewayVerdict =
   | { kind: 'business_rejection'; data: any; errors: any[] }
   | { kind: 'auth_error_401'; reason: string }
   | { kind: 'clearance_fallback_303'; redirectLocation?: string }
+  | { kind: 'duplicate_uuid_recovered'; data: any; message: string }
   | { kind: 'outage_retry'; reason: string; retryAfterSeconds: number; cloudflareRayId?: string };
+
+export function getZatcaOutboundHeaders(
+  authSecretBase64: string,
+  isCompliance: boolean = false
+): Record<string, string> {
+  return {
+    Accept: 'application/json',
+    'Accept-Language': 'ar',
+    'Accept-Version': 'V2',
+    'Content-Type': 'application/json',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    Authorization: `Basic ${authSecretBase64}`
+  };
+}
 
 export function classifyGatewayResponse(res: HttpResponse): GatewayVerdict {
   const contentType = (res.headers['content-type'] as string) || '';
@@ -71,6 +86,20 @@ export function classifyGatewayResponse(res: HttpResponse): GatewayVerdict {
       reason: `Unparseable response body with status ${res.statusCode}`,
       retryAfterSeconds: 20
     };
+  }
+
+  if (res.statusCode === 409) {
+    const isDuplicate =
+      res.rawBody.toLowerCase().includes('duplicate') ||
+      res.rawBody.toLowerCase().includes('already exists') ||
+      res.rawBody.toLowerCase().includes('uuid');
+    if (isDuplicate) {
+      return {
+        kind: 'duplicate_uuid_recovered',
+        data: json,
+        message: 'Invoice UUID already recorded by ZATCA during previous network attempt'
+      };
+    }
   }
 
   if (res.statusCode === 200) {

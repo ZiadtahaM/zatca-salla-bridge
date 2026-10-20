@@ -4,6 +4,7 @@ import { sallaWebhookRoutes } from './routes/salla-webhook.js';
 import { onboardingRoutes } from './routes/onboarding-route.js';
 import { validatorRoutes } from './routes/validator-route.js';
 import { opsRoutes } from './routes/ops-route.js';
+import { invoicePdfRoutes } from './routes/invoice-pdf-route.js';
 import { pool, initializeDatabaseSchema } from './storage/db.js';
 
 export function buildServer() {
@@ -39,6 +40,7 @@ export function buildServer() {
   app.register(onboardingRoutes);
   app.register(validatorRoutes);
   app.register(opsRoutes);
+  app.register(invoicePdfRoutes);
 
   return app;
 }

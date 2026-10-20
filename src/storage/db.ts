@@ -153,6 +153,39 @@ export async function initializeDatabaseSchema(): Promise<void> {
 
       CREATE INDEX IF NOT EXISTS idx_dlq_stalled ON zatca_dlq(is_stalled, last_failed_at);
       CREATE INDEX IF NOT EXISTS idx_dlq_merchant ON zatca_dlq(merchant_id, resolved_at);
+
+      CREATE TABLE IF NOT EXISTS merchant_tokens (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          merchant_id VARCHAR(64) NOT NULL UNIQUE,
+          access_token_encrypted TEXT NOT NULL,
+          refresh_token_encrypted TEXT NOT NULL,
+          expires_at TIMESTAMPTZ NOT NULL,
+          token_scope TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT chk_merchant_access_token CHECK (access_token_encrypted LIKE 'v1:%'),
+          CONSTRAINT chk_merchant_refresh_token CHECK (refresh_token_encrypted LIKE 'v1:%')
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_merchant_tokens_merchant ON merchant_tokens(merchant_id);
+
+      CREATE TABLE IF NOT EXISTS pending_b2b_orders (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          merchant_id VARCHAR(64) NOT NULL,
+          order_id VARCHAR(128) NOT NULL,
+          idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+          egs_unit_id UUID NOT NULL REFERENCES egs_units(id) ON DELETE RESTRICT,
+          buyer_vat VARCHAR(15) NOT NULL,
+          buyer_name VARCHAR(255) NOT NULL,
+          order_payload JSONB NOT NULL,
+          missing_fields JSONB NOT NULL,
+          status VARCHAR(32) NOT NULL DEFAULT 'pending_enrichment',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pending_b2b_order ON pending_b2b_orders(order_id);
+      CREATE INDEX IF NOT EXISTS idx_pending_b2b_merchant ON pending_b2b_orders(merchant_id, status);
     `);
   } finally {
     client.release();

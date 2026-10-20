@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zatca-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zatca_admin
+      POSTGRES_PASSWORD: secret_zatca_password
+      POSTGRES_DB: zatca_ledger
+    volumes:
+      - zatca_pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zatca_admin -d zatca_ledger"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  zatca-bridge:
+    build: .
+    container_name: zatca-bridge
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://zatca_admin:secret_zatca_password@postgres:5432/zatca_ledger
+      PORT: 3000
+      HOST: 0.0.0.0
+      LOG_LEVEL: info
+      SALLA_WEBHOOK_SECRET: change_in_production
+      ZATCA_ENV: sandbox
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  zatca_pgdata:

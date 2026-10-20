@@ -1,7 +1,7 @@
 # Current State: ZATCA-Salla Bridge
 
 ## Active Focus
-Production-grade ZATCA Phase 2 resilient e-invoicing bridge for Saudi merchants on Salla and Zid (Waves 24 & 25).
+Production-grade ZATCA Phase 2 resilient e-invoicing bridge for Saudi merchants on Salla and Zid (Waves 24 & 25). Hardened for commercial production with automated tester army and multi-agent verification swarm.
 
 ## Progress Checklist
 - [x] Fastify server with raw body buffering and health/readiness endpoints.
@@ -15,5 +15,11 @@ Production-grade ZATCA Phase 2 resilient e-invoicing bridge for Saudi merchants 
 - [x] Milestone 2: Salla refund and cancellation webhook ingestion with UBL 2.1 Credit Note 381 and BillingReference generation.
 - [x] Milestone 3: Lead Magnet Pre-Flight Debugger API and self-contained bilingual RTL/LTR diagnostic dashboard.
 - [x] Multi-stage production Dockerfile and docker-compose.yml configuration.
-- [x] 13/13 unit and integration tests passing across all suites.
-- [x] Full TypeScript compilation (tsc) with zero errors.
+- [x] Saudi PDPL Law 151/2020 Compliance: Multi-tenant AES-256-GCM vault for private keys and CSID secrets with database check constraints and zero plaintext fallback.
+- [x] Filesystem Key Hygiene: Automated cleanup of temporary directories and PEM files in finally blocks.
+- [x] Multi-Branch and Retail POS Isolation: Separate EGS stamp units and isolated monotonic hash chains mapped per terminal and branch location.
+- [x] Automated CSID Renewal and Expiry Tracking: 7-day proactive warning worker with bilingual Arabic/English merchant alerts.
+- [x] Dead Letter Queue (DLQ) Backpressure Monitor: 30-minute stall detection and 24-hour statutory deadline alert escalation.
+- [x] 22/22 tests passing across 6 test suites with exit code 0.
+- [x] Unanimous PASS verdicts from 5 independent zero-context subagents.
+- [x] Clean TypeScript build (tsc) with 0 diagnostic errors.

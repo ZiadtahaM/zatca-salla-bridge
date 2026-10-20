@@ -393,7 +393,7 @@ export async function processSallaOrderIntoZatcaInvoice(
   try {
     const egsRes = await client.query(
       `SELECT id, merchant_id, current_icv, last_document_hash, 
-              private_key_pem, certificate, expires_at, csid_environment
+              private_key_pem, csid_secret, certificate, expires_at, csid_environment
        FROM egs_units 
        WHERE id = $1 FOR UPDATE`,
       [egsUnitId]
@@ -425,9 +425,7 @@ export async function processSallaOrderIntoZatcaInvoice(
       isB2C
     });
 
-    const privateKeyPem = egs.private_key_pem.startsWith('v1:')
-      ? decryptVaultSecret(egs.private_key_pem)
-      : egs.private_key_pem;
+    const privateKeyPem = decryptVaultSecret(egs.private_key_pem);
 
     const signed: SignOutput = signZatcaInvoiceExact({
       rawXml,
@@ -530,7 +528,7 @@ export async function processSallaRefundIntoZatcaCreditNote(
 
     const egsRes = await client.query(
       `SELECT id, merchant_id, current_icv, last_document_hash, 
-              private_key_pem, certificate, expires_at, csid_environment
+              private_key_pem, csid_secret, certificate, expires_at, csid_environment
        FROM egs_units 
        WHERE id = $1 FOR UPDATE`,
       [egsUnitId]
@@ -560,9 +558,7 @@ export async function processSallaRefundIntoZatcaCreditNote(
       isB2C
     });
 
-    const privateKeyPem = egs.private_key_pem.startsWith('v1:')
-      ? decryptVaultSecret(egs.private_key_pem)
-      : egs.private_key_pem;
+    const privateKeyPem = decryptVaultSecret(egs.private_key_pem);
 
     const signed = signZatcaInvoiceExact({
       rawXml: rawCreditNoteXml,

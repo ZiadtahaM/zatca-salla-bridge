@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { pool } from '../storage/db.js';
 import { onboardEgsUnit, MockZatcaApiClient } from '../services/onboarding-service.js';
 import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 
 export const OnboardRequestSchema = z.object({
   merchantId: z.string().min(1),
@@ -51,6 +52,11 @@ export async function onboardingRoutes(fastify: FastifyInstance): Promise<void> 
       });
     } finally {
       client.release();
+      try {
+        rmSync(workDir, { recursive: true, force: true });
+      } catch {
+        // Ignored if already cleaned
+      }
     }
   });
 }

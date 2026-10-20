@@ -6,4 +6,6 @@ yarn-debug.log*
 yarn-error.log*
 .DS_Store
 .zatca-e2e-csr*/
+.zatca-test-csr*/
+.zatca-onboard-temp*/
 

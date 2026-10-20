@@ -64,6 +64,7 @@ export async function initializeDatabaseSchema(): Promise<void> {
           public_key_bytes BYTEA NOT NULL,
           ca_signature_bytes BYTEA NOT NULL,
           private_key_pem TEXT NOT NULL,
+          csid_secret TEXT NOT NULL,
           current_icv BIGINT NOT NULL DEFAULT 0,
           last_document_hash VARCHAR(64) NOT NULL,
           expires_at TIMESTAMPTZ NOT NULL,
@@ -72,11 +73,14 @@ export async function initializeDatabaseSchema(): Promise<void> {
           is_active BOOLEAN NOT NULL DEFAULT TRUE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          CONSTRAINT uq_merchant_branch_unit UNIQUE (merchant_id, branch_id, custom_id)
+          CONSTRAINT uq_merchant_branch_unit UNIQUE (merchant_id, branch_id, custom_id),
+          CONSTRAINT chk_egs_encrypted_key CHECK (private_key_pem LIKE 'v1:%'),
+          CONSTRAINT chk_egs_encrypted_secret CHECK (csid_secret LIKE 'v1:%')
       );
 
       ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS salla_branch_id VARCHAR(64);
       ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS terminal_id VARCHAR(64);
+      ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS csid_secret TEXT;
       ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS renewal_status VARCHAR(32) NOT NULL DEFAULT 'active';
       ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS last_renewal_alert_at TIMESTAMPTZ;
 

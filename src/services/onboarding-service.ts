@@ -3,6 +3,7 @@ import { generateZatcaCsr, CsrInput } from './csr-generator.js';
 import { extractX509Metadata } from '../crypto/zatca-signer.js';
 import { encryptVaultSecret } from '../crypto/vault.js';
 import { X509Certificate } from 'node:crypto';
+import { rmSync } from 'node:fs';
 
 export interface OnboardMerchantRequest {
   merchantId: string;
@@ -126,53 +127,65 @@ export async function onboardEgsUnit(
   const egsUuid = crypto.randomUUID();
 
   const encryptedPrivateKey = encryptVaultSecret(privateKeyPem);
+  const encryptedCsidSecret = encryptVaultSecret(finalSecret);
 
-  const insertRes = await client.query(
-    `INSERT INTO egs_units (
-      merchant_id, branch_id, salla_branch_id, terminal_id, egs_uuid, custom_id, model,
-      csid_environment, certificate, certificate_hash,
-      public_key_bytes, ca_signature_bytes, private_key_pem,
-      current_icv, last_document_hash, expires_at, is_active
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, TRUE)
-    ON CONFLICT (merchant_id, branch_id, custom_id) 
-    DO UPDATE SET 
-      salla_branch_id = EXCLUDED.salla_branch_id,
-      terminal_id = EXCLUDED.terminal_id,
-      certificate = EXCLUDED.certificate,
-      certificate_hash = EXCLUDED.certificate_hash,
-      public_key_bytes = EXCLUDED.public_key_bytes,
-      ca_signature_bytes = EXCLUDED.ca_signature_bytes,
-      private_key_pem = EXCLUDED.private_key_pem,
-      expires_at = EXCLUDED.expires_at,
-      csid_environment = EXCLUDED.csid_environment,
-      updated_at = NOW()
-    RETURNING id`,
-    [
-      req.merchantId,
-      req.branchId,
-      req.sallaBranchId || null,
-      req.terminalId || null,
-      egsUuid,
+  try {
+    const insertRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, salla_branch_id, terminal_id, egs_uuid, custom_id, model,
+        csid_environment, certificate, certificate_hash,
+        public_key_bytes, ca_signature_bytes, private_key_pem, csid_secret,
+        current_icv, last_document_hash, expires_at, is_active
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, TRUE)
+      ON CONFLICT (merchant_id, branch_id, custom_id) 
+      DO UPDATE SET 
+        salla_branch_id = EXCLUDED.salla_branch_id,
+        terminal_id = EXCLUDED.terminal_id,
+        certificate = EXCLUDED.certificate,
+        certificate_hash = EXCLUDED.certificate_hash,
+        public_key_bytes = EXCLUDED.public_key_bytes,
+        ca_signature_bytes = EXCLUDED.ca_signature_bytes,
+        private_key_pem = EXCLUDED.private_key_pem,
+        csid_secret = EXCLUDED.csid_secret,
+        expires_at = EXCLUDED.expires_at,
+        csid_environment = EXCLUDED.csid_environment,
+        updated_at = NOW()
+      RETURNING id`,
+      [
+        req.merchantId,
+        req.branchId,
+        req.sallaBranchId || null,
+        req.terminalId || null,
+        egsUuid,
+        customId,
+        csrInput.egsModel,
+        isProduction ? 'production' : 'compliance',
+        certPem,
+        certMeta.certHashBase64,
+        certMeta.publicKeySpkiDer,
+        certMeta.caSignatureDer,
+        encryptedPrivateKey,
+        encryptedCsidSecret,
+        0,
+        initialPih,
+        expiresAt
+      ]
+    );
+
+    return {
+      egsUnitId: insertRes.rows[0].id,
       customId,
-      csrInput.egsModel,
-      isProduction ? 'production' : 'compliance',
-      certPem,
-      certMeta.certHashBase64,
-      certMeta.publicKeySpkiDer,
-      certMeta.caSignatureDer,
-      encryptedPrivateKey,
-      0,
-      initialPih,
-      expiresAt
-    ]
-  );
-
-  return {
-    egsUnitId: insertRes.rows[0].id,
-    customId,
-    environment: isProduction ? 'production' : 'compliance',
-    certificateHash: certMeta.certHashBase64,
-    expiresAt,
-    status: 'active'
-  };
+      environment: isProduction ? 'production' : 'compliance',
+      certificateHash: certMeta.certHashBase64,
+      expiresAt,
+      status: 'active'
+    };
+  } finally {
+    // Strictly purge temporary directory with private key from filesystem
+    try {
+      rmSync(workDir, { recursive: true, force: true });
+    } catch {
+      // Ignore if already cleaned
+    }
+  }
 }

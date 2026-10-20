@@ -1,6 +1,7 @@
 import { PoolClient } from 'pg';
 import { SallaOrderData, SallaOrderItem } from '../types/salla.js';
 import { signZatcaInvoiceExact, SignOutput } from '../crypto/zatca-signer.js';
+import { decryptVaultSecret } from '../crypto/vault.js';
 
 export interface GeneratedInvoiceResult {
   invoiceId: string;
@@ -424,9 +425,13 @@ export async function processSallaOrderIntoZatcaInvoice(
       isB2C
     });
 
+    const privateKeyPem = egs.private_key_pem.startsWith('v1:')
+      ? decryptVaultSecret(egs.private_key_pem)
+      : egs.private_key_pem;
+
     const signed: SignOutput = signZatcaInvoiceExact({
       rawXml,
-      privateKeyPem: egs.private_key_pem,
+      privateKeyPem,
       certPem: egs.certificate,
       sellerNameArabic: 'شركة رواء للملابس الفاخرة',
       sellerVatNumber: '300075588700003',
@@ -555,9 +560,13 @@ export async function processSallaRefundIntoZatcaCreditNote(
       isB2C
     });
 
+    const privateKeyPem = egs.private_key_pem.startsWith('v1:')
+      ? decryptVaultSecret(egs.private_key_pem)
+      : egs.private_key_pem;
+
     const signed = signZatcaInvoiceExact({
       rawXml: rawCreditNoteXml,
-      privateKeyPem: egs.private_key_pem,
+      privateKeyPem,
       certPem: egs.certificate,
       sellerNameArabic: 'شركة رواء للملابس الفاخرة',
       sellerVatNumber: '300075588700003',

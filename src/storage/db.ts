@@ -53,6 +53,8 @@ export async function initializeDatabaseSchema(): Promise<void> {
           id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
           merchant_id VARCHAR(64) NOT NULL,
           branch_id VARCHAR(64) NOT NULL,
+          salla_branch_id VARCHAR(64),
+          terminal_id VARCHAR(64),
           egs_uuid UUID NOT NULL UNIQUE,
           custom_id VARCHAR(100) NOT NULL,
           model VARCHAR(100) NOT NULL,
@@ -65,13 +67,22 @@ export async function initializeDatabaseSchema(): Promise<void> {
           current_icv BIGINT NOT NULL DEFAULT 0,
           last_document_hash VARCHAR(64) NOT NULL,
           expires_at TIMESTAMPTZ NOT NULL,
+          renewal_status VARCHAR(32) NOT NULL DEFAULT 'active',
+          last_renewal_alert_at TIMESTAMPTZ,
           is_active BOOLEAN NOT NULL DEFAULT TRUE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           CONSTRAINT uq_merchant_branch_unit UNIQUE (merchant_id, branch_id, custom_id)
       );
 
+      ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS salla_branch_id VARCHAR(64);
+      ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS terminal_id VARCHAR(64);
+      ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS renewal_status VARCHAR(32) NOT NULL DEFAULT 'active';
+      ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS last_renewal_alert_at TIMESTAMPTZ;
+
       CREATE INDEX IF NOT EXISTS idx_egs_units_merchant ON egs_units(merchant_id);
+      CREATE INDEX IF NOT EXISTS idx_egs_units_merchant_salla_branch ON egs_units(merchant_id, salla_branch_id);
+      CREATE INDEX IF NOT EXISTS idx_egs_units_expiry ON egs_units(expires_at, renewal_status);
 
       CREATE TABLE IF NOT EXISTS invoices (
           id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -120,6 +131,24 @@ export async function initializeDatabaseSchema(): Promise<void> {
 
       CREATE INDEX IF NOT EXISTS idx_zatca_submissions_invoice ON zatca_submissions(invoice_id);
       CREATE INDEX IF NOT EXISTS idx_zatca_submissions_outage ON zatca_submissions(is_outage_error, submission_timestamp);
+
+      CREATE TABLE IF NOT EXISTS zatca_dlq (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+          merchant_id VARCHAR(64) NOT NULL,
+          egs_unit_id UUID NOT NULL REFERENCES egs_units(id) ON DELETE CASCADE,
+          failure_reason TEXT NOT NULL,
+          http_status INTEGER,
+          attempt_count INTEGER NOT NULL DEFAULT 1,
+          first_failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          last_failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          is_stalled BOOLEAN NOT NULL DEFAULT FALSE,
+          alerted_at TIMESTAMPTZ,
+          resolved_at TIMESTAMPTZ
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_dlq_stalled ON zatca_dlq(is_stalled, last_failed_at);
+      CREATE INDEX IF NOT EXISTS idx_dlq_merchant ON zatca_dlq(merchant_id, resolved_at);
     `);
   } finally {
     client.release();

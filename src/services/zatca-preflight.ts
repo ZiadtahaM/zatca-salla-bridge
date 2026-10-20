@@ -44,7 +44,7 @@ export interface PreflightValidationResult {
 const VAT_REGEX = /^3\d{13}3$/;
 const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
-const TIME_REGEX = /^\d{2}:\d{2}:\d{2}$/;
+const TIME_REGEX = /^\d{2}:\d{2}:\d{2}(?:Z)?$/;
 const BASE64_SHA256_REGEX = /^[A-Za-z0-9+/]{43}=$/;
 
 export function validateZatcaPreflight(content: string, format: 'xml' | 'salla_json' = 'xml'): PreflightValidationResult {

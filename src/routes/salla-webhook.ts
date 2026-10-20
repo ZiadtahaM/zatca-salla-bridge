@@ -3,6 +3,7 @@ import { SallaWebhookPayloadSchema, SallaWebhookPayload } from '../types/salla.j
 import { verifySallaWebhookSignature } from '../services/webhook-verifier.js';
 import { pool } from '../storage/db.js';
 import { processSallaOrderIntoZatcaInvoice, processSallaRefundIntoZatcaCreditNote } from '../services/invoice-generator.js';
+import { resolveEgsUnitForOrder } from '../services/branch-router.js';
 
 export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post('/webhooks/salla', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -63,20 +64,23 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
         });
       }
 
-      const egsRes = await client.query(
-        `SELECT id FROM egs_units 
-         WHERE merchant_id = $1 AND is_active = TRUE 
-         LIMIT 1`,
-        [merchantId]
-      );
+      const sallaBranchId = (payload.data as any).branch_id?.toString() || (payload.data as any).shipping?.branch_id?.toString();
+      const terminalId = (payload.data as any).terminal_id?.toString();
 
-      if (egsRes.rows.length === 0) {
+      let resolvedUnit;
+      try {
+        resolvedUnit = await resolveEgsUnitForOrder(client, {
+          merchantId,
+          sallaBranchId,
+          terminalId
+        });
+      } catch (err: any) {
         return reply.status(422).send({
           error: `No active EGS unit registered for Salla merchant: ${merchantId}`
         });
       }
 
-      const egsUnitId = egsRes.rows[0].id;
+      const egsUnitId = resolvedUnit.id;
 
       let result;
       if (isRefundOrCancel) {

@@ -1,11 +1,14 @@
 import { PoolClient } from 'pg';
 import { generateZatcaCsr, CsrInput } from './csr-generator.js';
 import { extractX509Metadata } from '../crypto/zatca-signer.js';
+import { encryptVaultSecret } from '../crypto/vault.js';
 import { X509Certificate } from 'node:crypto';
 
 export interface OnboardMerchantRequest {
   merchantId: string;
   branchId: string;
+  sallaBranchId?: string;
+  terminalId?: string;
   storeName: string;
   vatNumber: string;
   otp: string;
@@ -122,15 +125,19 @@ export async function onboardEgsUnit(
   const expiresAt = new Date(x509.validTo);
   const egsUuid = crypto.randomUUID();
 
+  const encryptedPrivateKey = encryptVaultSecret(privateKeyPem);
+
   const insertRes = await client.query(
     `INSERT INTO egs_units (
-      merchant_id, branch_id, egs_uuid, custom_id, model,
+      merchant_id, branch_id, salla_branch_id, terminal_id, egs_uuid, custom_id, model,
       csid_environment, certificate, certificate_hash,
       public_key_bytes, ca_signature_bytes, private_key_pem,
       current_icv, last_document_hash, expires_at, is_active
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, TRUE)
     ON CONFLICT (merchant_id, branch_id, custom_id) 
     DO UPDATE SET 
+      salla_branch_id = EXCLUDED.salla_branch_id,
+      terminal_id = EXCLUDED.terminal_id,
       certificate = EXCLUDED.certificate,
       certificate_hash = EXCLUDED.certificate_hash,
       public_key_bytes = EXCLUDED.public_key_bytes,
@@ -143,6 +150,8 @@ export async function onboardEgsUnit(
     [
       req.merchantId,
       req.branchId,
+      req.sallaBranchId || null,
+      req.terminalId || null,
       egsUuid,
       customId,
       csrInput.egsModel,
@@ -151,7 +160,7 @@ export async function onboardEgsUnit(
       certMeta.certHashBase64,
       certMeta.publicKeySpkiDer,
       certMeta.caSignatureDer,
-      privateKeyPem,
+      encryptedPrivateKey,
       0,
       initialPih,
       expiresAt

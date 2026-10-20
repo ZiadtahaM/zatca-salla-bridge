@@ -3,6 +3,7 @@ import rawBody from 'fastify-raw-body';
 import { sallaWebhookRoutes } from './routes/salla-webhook.js';
 import { onboardingRoutes } from './routes/onboarding-route.js';
 import { validatorRoutes } from './routes/validator-route.js';
+import { opsRoutes } from './routes/ops-route.js';
 import { pool, initializeDatabaseSchema } from './storage/db.js';
 
 export function buildServer() {
@@ -37,6 +38,7 @@ export function buildServer() {
   app.register(sallaWebhookRoutes);
   app.register(onboardingRoutes);
   app.register(validatorRoutes);
+  app.register(opsRoutes);
 
   return app;
 }

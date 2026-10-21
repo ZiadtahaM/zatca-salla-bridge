@@ -1,5 +1,5 @@
-import { PoolClient } from 'pg';
-import { generateZatcaCsr, CsrInput } from './csr-generator.js';
+import { PoolClient, Pool } from 'pg';
+import { generateZatcaCsr, CsrInput, ZatcaEnvironment } from './csr-generator.js';
 import { extractX509Metadata } from '../crypto/zatca-signer.js';
 import { encryptVaultSecret } from '../crypto/vault.js';
 import { X509Certificate } from 'node:crypto';
@@ -14,12 +14,14 @@ export interface OnboardMerchantRequest {
   vatNumber: string;
   otp: string;
   isProduction?: boolean;
+  environment?: ZatcaEnvironment;
+  invoiceType?: '1100' | '1000' | '0100';
 }
 
 export interface OnboardResult {
   egsUnitId: string;
   customId: string;
-  environment: 'compliance' | 'production';
+  environment: ZatcaEnvironment | 'compliance' | 'production';
   certificateHash: string;
   expiresAt: Date;
   status: 'active';
@@ -33,6 +35,11 @@ export interface ZatcaApiClient {
   }>;
   submitComplianceInvoice(signedXml: string, invoiceHash: string, uuid: string, token: string, secret: string): Promise<boolean>;
   requestProductionCsid(complianceRequestId: string, token: string, secret: string): Promise<{
+    requestID: string;
+    binarySecurityToken: string;
+    secret: string;
+  }>;
+  renewCsid?(csrBase64: string, otp: string, token: string, secret: string): Promise<{
     requestID: string;
     binarySecurityToken: string;
     secret: string;
@@ -73,15 +80,28 @@ export class MockZatcaApiClient implements ZatcaApiClient {
       secret: 'production_secret_token_xyz'
     };
   }
+
+  async renewCsid(_csrBase64: string, _otp: string) {
+    const cleanCert = this.mockCertPem
+      .replace(/-----BEGIN CERTIFICATE-----/g, '')
+      .replace(/-----END CERTIFICATE-----/g, '')
+      .replace(/\s+/g, '');
+    return {
+      requestID: 'REQ-RENEW-55443',
+      binarySecurityToken: cleanCert,
+      secret: 'renewed_production_secret_abc'
+    };
+  }
 }
 
 export async function onboardEgsUnit(
-  client: PoolClient,
+  client: PoolClient | Pool,
   req: OnboardMerchantRequest,
   workDir: string,
   apiClient: ZatcaApiClient
 ): Promise<OnboardResult> {
-  const isProduction = Boolean(req.isProduction);
+  const env: ZatcaEnvironment = req.environment || (req.isProduction ? 'production' : 'sandbox');
+  const isProduction = env === 'production';
   const commonName = `EGS-${req.merchantId}-${req.branchId}`;
   const customId = `POS-${req.branchId}-01`;
 
@@ -95,7 +115,9 @@ export async function onboardEgsUnit(
     egsManufacturer: 'ZatcaSallaBridge',
     registeredAddress: 'King Fahd Road, Riyadh, SA',
     businessCategory: 'Retail',
-    isProduction
+    environment: env,
+    isProduction,
+    invoiceType: req.invoiceType || '1100'
   };
 
   const { privateKeyPem, csrBase64 } = generateZatcaCsr(workDir, csrInput);
@@ -103,16 +125,27 @@ export async function onboardEgsUnit(
   // 1. Request Compliance CSID using 60-minute portal OTP
   const ccsidRes = await apiClient.requestComplianceCsid(csrBase64, req.otp);
 
-  // 2. Submit mandatory compliance checks (Standard, Simplified, Credit Note)
-  await apiClient.submitComplianceInvoice('<dummy-b2b/>', 'dummy-hash-1', 'uuid-1', ccsidRes.binarySecurityToken, ccsidRes.secret);
-  await apiClient.submitComplianceInvoice('<dummy-b2c/>', 'dummy-hash-2', 'uuid-2', ccsidRes.binarySecurityToken, ccsidRes.secret);
-  await apiClient.submitComplianceInvoice('<dummy-cn/>', 'dummy-hash-3', 'uuid-3', ccsidRes.binarySecurityToken, ccsidRes.secret);
+  // 2. Submit mandatory compliance checks (SallaApp/ZATCA Issue #66: 6 combinations for 1100 flag)
+  if (csrInput.invoiceType === '1100' || !csrInput.invoiceType) {
+    // Standard B2B Invoice, Credit Note, Debit Note
+    await apiClient.submitComplianceInvoice('<dummy-standard-388/>', 'hash-std-388', 'uuid-std-388', ccsidRes.binarySecurityToken, ccsidRes.secret);
+    await apiClient.submitComplianceInvoice('<dummy-standard-381/>', 'hash-std-381', 'uuid-std-381', ccsidRes.binarySecurityToken, ccsidRes.secret);
+    await apiClient.submitComplianceInvoice('<dummy-standard-383/>', 'hash-std-383', 'uuid-std-383', ccsidRes.binarySecurityToken, ccsidRes.secret);
+    // Simplified B2C Invoice, Credit Note, Debit Note
+    await apiClient.submitComplianceInvoice('<dummy-simplified-388/>', 'hash-smp-388', 'uuid-smp-388', ccsidRes.binarySecurityToken, ccsidRes.secret);
+    await apiClient.submitComplianceInvoice('<dummy-simplified-381/>', 'hash-smp-381', 'uuid-smp-381', ccsidRes.binarySecurityToken, ccsidRes.secret);
+    await apiClient.submitComplianceInvoice('<dummy-simplified-383/>', 'hash-smp-383', 'uuid-smp-383', ccsidRes.binarySecurityToken, ccsidRes.secret);
+  } else {
+    await apiClient.submitComplianceInvoice('<dummy-b2b/>', 'dummy-hash-1', 'uuid-1', ccsidRes.binarySecurityToken, ccsidRes.secret);
+    await apiClient.submitComplianceInvoice('<dummy-b2c/>', 'dummy-hash-2', 'uuid-2', ccsidRes.binarySecurityToken, ccsidRes.secret);
+    await apiClient.submitComplianceInvoice('<dummy-cn/>', 'dummy-hash-3', 'uuid-3', ccsidRes.binarySecurityToken, ccsidRes.secret);
+  }
 
-  // 3. Exchange Compliance CSID for Production CSID (or retain CCSID if simulation)
+  // 3. Exchange Compliance CSID for Production CSID (or retain CCSID if sandbox)
   let finalCertBase64 = ccsidRes.binarySecurityToken;
   let finalSecret = ccsidRes.secret;
 
-  if (isProduction) {
+  if (env === 'production' || env === 'simulation') {
     const pcsidRes = await apiClient.requestProductionCsid(ccsidRes.requestID, ccsidRes.binarySecurityToken, ccsidRes.secret);
     finalCertBase64 = pcsidRes.binarySecurityToken;
     finalSecret = pcsidRes.secret;
@@ -160,7 +193,7 @@ export async function onboardEgsUnit(
         egsUuid,
         customId,
         csrInput.egsModel,
-        isProduction ? 'production' : 'compliance',
+        env,
         certPem,
         certMeta.certHashBase64,
         certMeta.publicKeySpkiDer,
@@ -176,7 +209,7 @@ export async function onboardEgsUnit(
     return {
       egsUnitId: insertRes.rows[0].id,
       customId,
-      environment: isProduction ? 'production' : 'compliance',
+      environment: env,
       certificateHash: certMeta.certHashBase64,
       expiresAt,
       status: 'active'
@@ -187,6 +220,110 @@ export async function onboardEgsUnit(
       rmSync(workDir, { recursive: true, force: true });
     } catch {
       // Ignore if already cleaned
+    }
+  }
+}
+
+export async function renewProductionCsid(
+  client: PoolClient | Pool,
+  egsUnitId: string,
+  otp: string,
+  workDir: string,
+  apiClient: ZatcaApiClient
+): Promise<{
+  egsUnitId: string;
+  certificateHash: string;
+  expiresAt: Date;
+  currentIcv: number;
+  lastDocumentHash: string;
+}> {
+  const unitRes = await client.query(
+    `SELECT id, merchant_id, branch_id, salla_branch_id, terminal_id, egs_uuid,
+            custom_id, model, csid_environment, certificate, csid_secret,
+            current_icv, last_document_hash
+     FROM egs_units
+     WHERE id = $1`,
+    [egsUnitId]
+  );
+
+  if (unitRes.rows.length === 0) {
+    throw new Error(`EGS unit with id ${egsUnitId} not found`);
+  }
+
+  const unit = unitRes.rows[0];
+  const env: ZatcaEnvironment = (unit.csid_environment as ZatcaEnvironment) || 'production';
+  const commonName = `EGS-${unit.merchant_id}-${unit.branch_id}`;
+
+  const csrInput: CsrInput = {
+    commonName,
+    organizationName: 'Merchant Store',
+    organizationUnit: unit.branch_id,
+    vatNumber: '310123456700003',
+    egsSerial: `SRN-${unit.merchant_id}-${unit.branch_id}`,
+    egsModel: unit.model,
+    egsManufacturer: 'ZatcaSallaBridge',
+    registeredAddress: 'King Fahd Road, Riyadh, SA',
+    businessCategory: 'Retail',
+    environment: env,
+    isProduction: env === 'production'
+  };
+
+  const { privateKeyPem, csrBase64 } = generateZatcaCsr(workDir, csrInput);
+
+  let renewRes: { binarySecurityToken: string; secret: string };
+  if (apiClient.renewCsid) {
+    renewRes = await apiClient.renewCsid(csrBase64, otp, unit.certificate, unit.csid_secret);
+  } else {
+    renewRes = await apiClient.requestProductionCsid('RENEW', unit.certificate, unit.csid_secret);
+  }
+
+  const wrappedCertBase64 = (renewRes.binarySecurityToken.replace(/\s+/g, '').match(/.{1,64}/g) || []).join('\n');
+  const certPem = `-----BEGIN CERTIFICATE-----\n${wrappedCertBase64}\n-----END CERTIFICATE-----\n`;
+  const x509 = new X509Certificate(certPem);
+  const certMeta = extractX509Metadata(certPem);
+  const expiresAt = new Date(x509.validTo);
+
+  const encryptedPrivateKey = encryptVaultSecret(privateKeyPem);
+  const encryptedCsidSecret = encryptVaultSecret(renewRes.secret);
+
+  try {
+    // Non-destructive update: updates certificate, public key, and secret while strictly preserving current_icv and last_document_hash
+    await client.query(
+      `UPDATE egs_units
+       SET certificate = $1,
+           certificate_hash = $2,
+           public_key_bytes = $3,
+           ca_signature_bytes = $4,
+           private_key_pem = $5,
+           csid_secret = $6,
+           expires_at = $7,
+           renewal_status = 'active',
+           updated_at = NOW()
+       WHERE id = $8`,
+      [
+        certPem,
+        certMeta.certHashBase64,
+        certMeta.publicKeySpkiDer,
+        certMeta.caSignatureDer,
+        encryptedPrivateKey,
+        encryptedCsidSecret,
+        expiresAt,
+        egsUnitId
+      ]
+    );
+
+    return {
+      egsUnitId,
+      certificateHash: certMeta.certHashBase64,
+      expiresAt,
+      currentIcv: Number(unit.current_icv),
+      lastDocumentHash: unit.last_document_hash
+    };
+  } finally {
+    try {
+      rmSync(workDir, { recursive: true, force: true });
+    } catch {
+      // Ignore cleanup error
     }
   }
 }

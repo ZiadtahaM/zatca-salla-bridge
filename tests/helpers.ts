@@ -189,6 +189,8 @@ export function attachStatefulRelationalTestDb(pool: any): void {
   const egsUnits: any[] = [];
   const invoices: any[] = [];
   const pendingB2bOrders: any[] = [];
+  const merchantSubscriptions: any[] = [];
+  const zatcaDlq: any[] = [];
 
   const executeQuery = async (sql: string, params: any[] = []): Promise<{ rows: any[]; rowCount: number }> => {
     const normalized = sql.replace(/\s+/g, ' ').trim();
@@ -198,7 +200,7 @@ export function attachStatefulRelationalTestDb(pool: any): void {
     }
 
     if (normalized.includes('INSERT INTO merchant_tokens')) {
-      const [merchant_id, access_token_encrypted, refresh_token_encrypted, expires_at, token_scope] = params;
+      const [merchant_id, access_token_encrypted, refresh_token_encrypted, expires_at, token_scope, store_name, vat_number, crn, city] = params;
       if (!String(access_token_encrypted).startsWith('v1:') || !String(refresh_token_encrypted).startsWith('v1:')) {
         throw new Error('new row for relation "merchant_tokens" violates check constraint "chk_merchant_access_token"');
       }
@@ -208,6 +210,10 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         existing.refresh_token_encrypted = refresh_token_encrypted;
         existing.expires_at = expires_at;
         existing.token_scope = token_scope;
+        if (store_name !== undefined) existing.store_name = store_name;
+        if (vat_number !== undefined) existing.vat_number = vat_number;
+        if (crn !== undefined) existing.crn = crn;
+        if (city !== undefined) existing.city = city;
         existing.updated_at = new Date();
       } else {
         merchantTokens.push({
@@ -217,6 +223,10 @@ export function attachStatefulRelationalTestDb(pool: any): void {
           refresh_token_encrypted,
           expires_at,
           token_scope,
+          store_name: store_name || null,
+          vat_number: vat_number || null,
+          crn: crn || null,
+          city: city || null,
           created_at: new Date(),
           updated_at: new Date()
         });
@@ -224,8 +234,81 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       return { rows: [], rowCount: 1 };
     }
 
+    if (normalized.includes('UPDATE merchant_tokens SET store_name =')) {
+      const existing = merchantTokens.find((t) => t.merchant_id === params[4]);
+      if (existing) {
+        existing.store_name = params[0];
+        existing.vat_number = params[1];
+        existing.crn = params[2];
+        existing.city = params[3];
+        existing.updated_at = new Date();
+      }
+      return { rows: [], rowCount: existing ? 1 : 0 };
+    }
+
+    if (normalized.includes('UPDATE merchant_tokens SET access_token_encrypted =')) {
+      const existing = merchantTokens.find((t) => t.merchant_id === params[3]);
+      if (existing) {
+        existing.access_token_encrypted = params[0];
+        existing.refresh_token_encrypted = params[1];
+        existing.expires_at = params[2];
+        existing.updated_at = new Date();
+      }
+      return { rows: [], rowCount: existing ? 1 : 0 };
+    }
+
+    if (normalized.includes('UPDATE merchant_tokens SET expires_at =')) {
+      const existing = merchantTokens.find((t) => t.merchant_id === params[1]);
+      if (existing) {
+        existing.expires_at = new Date(params[0]);
+        existing.updated_at = new Date();
+      }
+      return { rows: [], rowCount: existing ? 1 : 0 };
+    }
+
     if (normalized.includes('FROM merchant_tokens WHERE merchant_id = $1')) {
       const rows = merchantTokens.filter((t) => t.merchant_id === params[0]);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('INSERT INTO merchant_subscriptions')) {
+      const [merchant_id, plan_name, status, expires_at, trial_ends_at] = params;
+      const existing = merchantSubscriptions.find((s) => s.merchant_id === merchant_id);
+      if (existing) {
+        existing.plan_name = plan_name;
+        existing.status = status;
+        existing.expires_at = expires_at;
+        existing.trial_ends_at = trial_ends_at;
+        existing.updated_at = new Date();
+      } else {
+        merchantSubscriptions.push({
+          id: randomUUID(),
+          merchant_id,
+          plan_name: plan_name || 'standard',
+          status: status || 'active',
+          expires_at: expires_at || null,
+          trial_ends_at: trial_ends_at || null,
+          created_at: new Date(),
+          updated_at: new Date()
+        });
+      }
+      return { rows: [], rowCount: 1 };
+    }
+
+    if (normalized.includes('UPDATE merchant_subscriptions SET status =')) {
+      const existing = merchantSubscriptions.find((s) => s.merchant_id === params[params.length - 1]);
+      if (existing) {
+        existing.status = params[0];
+        if (params.length > 2) {
+          existing.expires_at = params[1];
+        }
+        existing.updated_at = new Date();
+      }
+      return { rows: [], rowCount: existing ? 1 : 0 };
+    }
+
+    if (normalized.includes('FROM merchant_subscriptions WHERE merchant_id = $1')) {
+      const rows = merchantSubscriptions.filter((s) => s.merchant_id === params[0]);
       return { rows, rowCount: rows.length };
     }
 
@@ -335,11 +418,24 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       return { rows, rowCount: rows.length };
     }
 
-    if (normalized.includes('UPDATE egs_units SET current_icv = $1')) {
-      const unit = egsUnits.find((u) => u.id === params[2]);
+    if (normalized.includes('UPDATE egs_units SET current_icv =')) {
+      const unit = egsUnits.find((u) => u.id === params[params.length - 1]);
       if (unit) {
-        unit.current_icv = Number(params[0]);
-        unit.last_document_hash = params[1];
+        if (normalized.includes('SET current_icv = $1')) {
+          unit.current_icv = Number(params[0]);
+          if (params.length > 2) {
+            unit.last_document_hash = params[1];
+          }
+        } else {
+          const match = normalized.match(/current_icv\s*=\s*(\d+)/);
+          if (match) {
+            unit.current_icv = Number(match[1]);
+          }
+          const hashMatch = normalized.match(/last_document_hash\s*=\s*'([^']+)'/);
+          if (hashMatch) {
+            unit.last_document_hash = hashMatch[1];
+          }
+        }
         unit.updated_at = new Date();
       }
       return { rows: [], rowCount: unit ? 1 : 0 };
@@ -417,6 +513,88 @@ export function attachStatefulRelationalTestDb(pool: any): void {
           created_at: new Date(),
           updated_at: new Date()
         });
+      } else if (normalized.includes("'tax_invoice'")) {
+        const [
+          egs_unit_id,
+          order_id,
+          idempotency_key,
+          uuid,
+          icv,
+          pih,
+          invoice_hash,
+          qr_code_payload,
+          signed_xml,
+          supply_date,
+          issue_timestamp,
+          subtotal,
+          tax_total,
+          grand_total
+        ] = params;
+        invoices.push({
+          id,
+          egs_unit_id,
+          order_id: String(order_id),
+          idempotency_key,
+          invoice_type: 'tax_invoice',
+          uuid,
+          icv: Number(icv),
+          pih,
+          invoice_hash,
+          qr_code_payload,
+          signed_xml,
+          cleared_xml: null,
+          status: 'signed',
+          supply_date,
+          issue_timestamp,
+          replaces_invoice_id: null,
+          subtotal,
+          tax_total,
+          grand_total,
+          currency: 'SAR',
+          created_at: new Date(),
+          updated_at: new Date()
+        });
+      } else if (normalized.includes("'simplified_tax_invoice'")) {
+        const [
+          egs_unit_id,
+          order_id,
+          idempotency_key,
+          uuid,
+          icv,
+          pih,
+          invoice_hash,
+          qr_code_payload,
+          signed_xml,
+          supply_date,
+          issue_timestamp,
+          subtotal,
+          tax_total,
+          grand_total
+        ] = params;
+        invoices.push({
+          id,
+          egs_unit_id,
+          order_id: String(order_id),
+          idempotency_key,
+          invoice_type: 'simplified_tax_invoice',
+          uuid,
+          icv: Number(icv),
+          pih,
+          invoice_hash,
+          qr_code_payload,
+          signed_xml,
+          cleared_xml: null,
+          status: 'signed',
+          supply_date,
+          issue_timestamp,
+          replaces_invoice_id: null,
+          subtotal,
+          tax_total,
+          grand_total,
+          currency: 'SAR',
+          created_at: new Date(),
+          updated_at: new Date()
+        });
       } else {
         const [
           egs_unit_id,
@@ -474,7 +652,10 @@ export function attachStatefulRelationalTestDb(pool: any): void {
           {
             ...inv,
             merchant_id: unit?.merchant_id,
-            branch_id: unit?.branch_id
+            branch_id: unit?.branch_id,
+            certificate: unit?.certificate,
+            csid_secret: unit?.csid_secret,
+            csid_environment: unit?.csid_environment
           }
         ],
         rowCount: 1
@@ -532,6 +713,120 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       if (row) {
         row.status = 'enriched_and_signed';
         row.updated_at = new Date();
+      }
+      return { rows: [], rowCount: row ? 1 : 0 };
+    }
+
+    if (normalized.includes('FROM pending_b2b_orders WHERE merchant_id = $1')) {
+      const rows = pendingB2bOrders.filter((p) => p.merchant_id === params[0]);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('UPDATE egs_units SET certificate = $1')) {
+      const unit = egsUnits.find((u) => u.id === params[7]);
+      if (unit) {
+        unit.certificate = params[0];
+        unit.certificate_hash = params[1];
+        unit.public_key_bytes = params[2];
+        unit.ca_signature_bytes = params[3];
+        unit.private_key_pem = params[4];
+        unit.csid_secret = params[5];
+        unit.expires_at = params[6];
+        unit.renewal_status = 'active';
+        unit.updated_at = new Date();
+      }
+      return { rows: [], rowCount: unit ? 1 : 0 };
+    }
+
+    if (normalized.includes('FROM egs_units WHERE merchant_id = $1')) {
+      const rows = egsUnits.filter((u) => u.merchant_id === params[0]);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('FROM invoices i JOIN egs_units u ON i.egs_unit_id = u.id WHERE u.merchant_id = $1') ||
+        (normalized.includes('FROM invoices') && normalized.includes('merchant_id = $1'))) {
+      const matchingUnits = egsUnits.filter((u) => u.merchant_id === params[0]).map((u) => u.id);
+      const rows = invoices
+        .filter((inv) => matchingUnits.includes(inv.egs_unit_id))
+        .map((inv) => ({
+          ...inv,
+          merchant_id: params[0]
+        }));
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('UPDATE invoices SET status = $1, cleared_xml = $2')) {
+      const inv = invoices.find((i) => i.id === params[3]);
+      if (inv) {
+        inv.status = params[0];
+        inv.cleared_xml = params[1];
+        inv.qr_code_payload = params[2];
+        inv.updated_at = new Date();
+      }
+      return { rows: [], rowCount: inv ? 1 : 0 };
+    }
+
+    if (normalized.includes('UPDATE invoices SET status = $1 WHERE id = $2')) {
+      const inv = invoices.find((i) => i.id === params[1]);
+      if (inv) {
+        inv.status = params[0];
+        inv.updated_at = new Date();
+      }
+      return { rows: [], rowCount: inv ? 1 : 0 };
+    }
+
+    if (normalized.includes('INSERT INTO zatca_dlq')) {
+      const [invoice_id, merchant_id, egs_unit_id, failure_reason, http_status] = params;
+      const id = randomUUID();
+      const row = {
+        id,
+        invoice_id,
+        merchant_id,
+        egs_unit_id,
+        failure_reason,
+        http_status: http_status || null,
+        attempt_count: 1,
+        first_failed_at: new Date(),
+        last_failed_at: new Date(),
+        is_stalled: false,
+        next_retry_at: null,
+        resolved_at: null
+      };
+      zatcaDlq.push(row);
+      return { rows: [{ id }], rowCount: 1 };
+    }
+
+    if (normalized.includes('FROM zatca_dlq WHERE invoice_id = $1 AND resolved_at IS NULL')) {
+      const rows = zatcaDlq.filter((d) => d.invoice_id === params[0] && !d.resolved_at);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('FROM zatca_dlq WHERE merchant_id = $1')) {
+      const rows = zatcaDlq.filter((d) => d.merchant_id === params[0]);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('FROM zatca_dlq WHERE resolved_at IS NULL')) {
+      const rows = zatcaDlq.filter((d) => !d.resolved_at);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('UPDATE zatca_dlq SET resolved_at = NOW()')) {
+      const row = zatcaDlq.find((d) => d.id === params[0]);
+      if (row) {
+        row.resolved_at = new Date();
+      }
+      return { rows: [], rowCount: row ? 1 : 0 };
+    }
+
+    if (normalized.includes('UPDATE zatca_dlq SET attempt_count =')) {
+      const row = zatcaDlq.find((d) => d.id === params[params.length - 1]);
+      if (row) {
+        row.attempt_count += 1;
+        row.last_failed_at = new Date();
+        row.failure_reason = params[0];
+        row.http_status = params[1];
+        if (params[2] !== undefined) row.is_stalled = params[2];
       }
       return { rows: [], rowCount: row ? 1 : 0 };
     }

@@ -52,13 +52,16 @@ A production-grade, fault-tolerant e-invoicing bridge connecting Saudi e-commerc
 | --- | --- | --- | --- |
 | `GET` | `/health` | Shallow liveness probe | Returns HTTP 200 `{ status: "healthy", timestamp }` |
 | `GET` | `/ready` | Deep readiness probe (PostgreSQL check) | Returns HTTP 200 `{ status: "ready", database: "connected" }` |
-| `POST` | `/api/egs/onboard` | Merchant EGS Unit onboarding & CSID exchange | Takes merchant VAT, store name, branch, and 6-digit Fatoora OTP. Returns `egs_unit_id` |
-| `POST` | `/webhooks/salla/authorize` | Salla App Store OAuth2 token receiver | Stores AES-256-GCM encrypted tokens in `merchant_tokens` |
+| `GET` | `/portal` | Merchant Self-Service Web Portal | Bilingual RTL portal for onboarding, B2B enrichment, PDF/A-3 download, and CSID renewal |
+| `POST` | `/api/egs/onboard` | Merchant EGS Unit onboarding & CSID exchange | Takes merchant VAT, store name, branch, environment, and 6-digit OTP |
+| `POST` | `/api/egs/:id/renew` | Non-destructive Production CSID renewal | Renews certificate with new OTP while preserving ICV counter and hash chain |
+| `POST` | `/webhooks/salla/authorize` | Salla App Store OAuth2 token receiver | Stores encrypted tokens, auto-fetches store profile from Salla API |
 | `GET` | `/api/salla/merchants/:merchantId/tokens` | Decrypted merchant token status | Returns token status and expiration date |
-| `POST` | `/webhooks/salla` | Primary Salla webhook receiver | Ingests `order.created`, `order.updated`, `order.refunded`, `order.cancelled` |
+| `POST` | `/webhooks/salla` | Primary Salla webhook receiver | Ingests orders, refunds, cancellations, and billing lifecycle events |
 | `POST` | `/api/b2b/orders/:orderId/enrich` | B2B buyer national address enrichment | Accepts building number, postal code, street, district, and city, then signs invoice |
 | `GET` | `/api/invoices/:id/pdf` | PDF/A-3 download | Returns binary PDF with embedded `ZATCA_eInvoice.xml` and TLV QR code |
 | `GET` | `/api/invoices/:id/printable` | Printable bilingual invoice HTML | Returns RTL/LTR HTML5 invoice with QR code and breakdown |
+| `POST` | `/api/invoices/:id/dispatch` | Outbound Fatoora Dispatcher | Manually dispatches signed invoice to ZATCA with DLQ retry and Salla timeline note |
 | `POST` | `/api/validate/preflight` | Pre-flight validator API | Audits raw XML or Salla order JSON against ZATCA rules |
 | `GET` | `/debugger` | Bilingual Pre-Flight UI | Interactive web dashboard for merchants and developers |
 | `GET` | `/api/ops/csid-status` | CSID expiration monitor | Lists EGS units expiring within 7 days |

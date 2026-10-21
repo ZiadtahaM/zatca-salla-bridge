@@ -3,6 +3,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+export type ZatcaEnvironment = 'sandbox' | 'simulation' | 'production';
+
 export interface CsrInput {
   commonName: string;
   organizationName: string;
@@ -13,7 +15,21 @@ export interface CsrInput {
   egsManufacturer: string;
   registeredAddress: string;
   businessCategory: string;
-  isProduction: boolean;
+  isProduction?: boolean;
+  environment?: ZatcaEnvironment;
+  invoiceType?: '1100' | '1000' | '0100';
+}
+
+export function getZatcaBaseUrl(environment: ZatcaEnvironment): string {
+  switch (environment) {
+    case 'production':
+      return 'https://gw-fatoora.zatca.gov.sa/e-invoicing/core';
+    case 'simulation':
+      return 'https://gw-fatoora.zatca.gov.sa/e-invoicing/simulation';
+    case 'sandbox':
+    default:
+      return 'https://gw-fatoora.zatca.gov.sa/e-invoicing/developer-portal';
+  }
 }
 
 export function resolveOpenSslPath(): string {
@@ -42,12 +58,19 @@ export function generateZatcaCsr(
 
   writeFileSync(keyPath, privateKey, 'utf8');
 
-  const templateOidValue = input.isProduction
-    ? 'ZATCA-Code-Signing'
-    : 'PREPSIT-Solution';
+  let templateOidValue = 'TSTZATCA-Code-Signing';
+  if (input.environment === 'production' || (!input.environment && input.isProduction)) {
+    templateOidValue = 'ZATCA-Code-Signing';
+  } else if (input.environment === 'simulation') {
+    templateOidValue = 'PREZATCA-Code-Signing';
+  } else if (input.environment === 'sandbox') {
+    templateOidValue = 'TSTZATCA-Code-Signing';
+  } else if (!input.isProduction) {
+    templateOidValue = 'PREPSIT-Solution';
+  }
 
   // 1100: Standard B2B and Simplified B2C capability flag
-  const invoiceTypeFlag = '1100';
+  const invoiceTypeFlag = input.invoiceType || '1100';
 
   const cnfContent = `
 [req]

@@ -9,7 +9,14 @@ import {
   validateB2bBuyerAddress
 } from '../services/invoice-generator.js';
 import { resolveEgsUnitForOrder } from '../services/branch-router.js';
-import { storeSallaMerchantTokens, getSallaMerchantTokens } from '../services/salla-oauth.js';
+import {
+  storeSallaMerchantTokens,
+  getSallaMerchantTokens,
+  fetchSallaStoreInfo,
+  updateMerchantStoreProfile,
+  updateMerchantSubscription,
+  isMerchantSubscriptionActive
+} from '../services/salla-oauth.js';
 
 export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post('/webhooks/salla/authorize', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -38,6 +45,24 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
         scope
       });
 
+      // Automatically pre-fetch store profile from Salla API to enable zero-configuration onboarding
+      try {
+        const storeInfo = await fetchSallaStoreInfo(accessToken);
+        if (storeInfo.name || storeInfo.vatNumber || storeInfo.crn || storeInfo.city) {
+          await updateMerchantStoreProfile(client, merchantId, {
+            storeName: storeInfo.name,
+            vatNumber: storeInfo.vatNumber,
+            crn: storeInfo.crn,
+            city: storeInfo.city
+          });
+        }
+      } catch {
+        // Non-blocking in offline or test environments
+      }
+
+      // Initialize automatic 14-day trial subscription if no active subscription exists
+      await updateMerchantSubscription(client, merchantId, 'standard', 'active');
+
       return reply.status(200).send({
         status: 'authorized',
         merchant_id: merchantId
@@ -58,7 +83,11 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
       return reply.status(200).send({
         merchant_id: tokens.merchantId,
         expires_at: tokens.expiresAt.toISOString(),
-        scope: tokens.scope
+        scope: tokens.scope,
+        store_name: tokens.storeName,
+        vat_number: tokens.vatNumber,
+        crn: tokens.crn,
+        city: tokens.city
       });
     } finally {
       client.release();
@@ -89,20 +118,57 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
     }
 
     const payload: SallaWebhookPayload = parseResult.data;
-
-    const isRefundOrCancel = payload.event === 'order.refunded' || payload.event === 'order.cancelled';
-    const isOrderUpsert = payload.event === 'order.created' || payload.event === 'order.updated';
-
-    if (!isRefundOrCancel && !isOrderUpsert) {
-      return reply.status(200).send({ message: `Ignored event: ${payload.event}` });
-    }
-
     const merchantId = payload.merchant.toString();
-    const orderId = payload.data.id.toString();
-    const idempotencyKey = `salla:${merchantId}:${payload.event}:${orderId}:${payload.created_at}`;
 
     const client = await pool.connect();
     try {
+      // Handle Salla App Store Billing Lifecycle Events
+      if (payload.event.startsWith('app.subscription.') || payload.event === 'app.uninstalled') {
+        const subData = (payload.data || {}) as any;
+        const planName = (subData.plan_name || 'standard').toString();
+        let status = 'active';
+
+        if (payload.event === 'app.uninstalled') {
+          status = 'uninstalled';
+        } else if (payload.event === 'app.subscription.expired') {
+          status = 'expired';
+        } else if (payload.event === 'app.subscription.canceled') {
+          status = 'canceled';
+        } else if (payload.event === 'app.subscription.started' || payload.event === 'app.subscription.renewed') {
+          status = 'active';
+        }
+
+        const expiresAt = subData.expires_at ? new Date(subData.expires_at) : null;
+        await updateMerchantSubscription(client, merchantId, planName, status, expiresAt);
+
+        return reply.status(200).send({
+          status: 'subscription_updated',
+          merchant_id: merchantId,
+          subscription_status: status
+        });
+      }
+
+      // Enforce active subscription check before processing orders
+      const subCheck = await isMerchantSubscriptionActive(client, merchantId);
+      if (!subCheck.active) {
+        return reply.status(402).send({
+          error: 'PAYMENT_REQUIRED',
+          code: 'SUBSCRIPTION_INACTIVE',
+          message: subCheck.reason || 'Merchant subscription is inactive, expired, or canceled. Please renew on Salla App Store.'
+        });
+      }
+
+      const isRefundOrCancel = payload.event === 'order.refunded' || payload.event === 'order.cancelled';
+      const isOrderUpsert = payload.event === 'order.created' || payload.event === 'order.updated';
+
+      if (!isRefundOrCancel && !isOrderUpsert) {
+        return reply.status(200).send({ message: `Ignored event: ${payload.event}` });
+      }
+
+      const orderData = payload.data as SallaOrderData;
+      const orderId = orderData.id.toString();
+      const idempotencyKey = `salla:${merchantId}:${payload.event}:${orderId}:${payload.created_at}`;
+
       const existing = await client.query(
         `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status 
          FROM invoices 
@@ -164,8 +230,8 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
           });
         }
 
-        const paymentMethod = payload.data.payment_method?.toLowerCase() || '';
-        const statusSlug = payload.data.status.slug?.toLowerCase() || '';
+        const paymentMethod = orderData.payment_method?.toLowerCase() || '';
+        const statusSlug = orderData.status?.slug?.toLowerCase() || '';
         const isDeferredPaymentMethod = ['cod', 'cash_on_delivery', 'bank', 'bank_transfer'].includes(paymentMethod);
         const isFinalizedStatus = ['completed', 'delivered'].includes(statusSlug);
 
@@ -173,19 +239,19 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
           return reply.status(200).send({
             status: 'deferred_payment_hold',
             order_id: orderId,
-            payment_method: payload.data.payment_method,
-            order_status: payload.data.status.slug,
+            payment_method: orderData.payment_method,
+            order_status: orderData.status?.slug,
             reason: 'COD and Bank Transfer orders are deferred until status reaches completed or delivered'
           });
         }
 
-        if (isB2bCustomer(payload.data.customer.tax_number)) {
-          const validation = validateB2bBuyerAddress(payload.data);
+        if (isB2bCustomer(orderData.customer?.tax_number)) {
+          const validation = validateB2bBuyerAddress(orderData);
           if (!validation.isValid) {
-            const buyerVat = payload.data.customer.tax_number!.trim();
+            const buyerVat = orderData.customer.tax_number!.trim();
             const buyerName = (
-              payload.data.customer.company_name ||
-              `${payload.data.customer.first_name} ${payload.data.customer.last_name || ''}`
+              orderData.customer.company_name ||
+              `${orderData.customer.first_name} ${orderData.customer.last_name || ''}`
             ).trim();
 
             const pendingRes = await client.query(
@@ -205,7 +271,7 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
                 egsUnitId,
                 buyerVat,
                 buyerName,
-                JSON.stringify(payload.data),
+                JSON.stringify(orderData),
                 JSON.stringify(validation.missingFields)
               ]
             );
@@ -226,7 +292,7 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
         result = await processSallaRefundIntoZatcaCreditNote(
           client,
           egsUnitId,
-          payload.data,
+          orderData,
           idempotencyKey,
           payload.event === 'order.cancelled' ? 'Order cancelled by customer or merchant' : 'Order refunded'
         );
@@ -234,7 +300,7 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
         result = await processSallaOrderIntoZatcaInvoice(
           client,
           egsUnitId,
-          payload.data,
+          orderData,
           idempotencyKey
         );
       }

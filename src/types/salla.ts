@@ -76,12 +76,68 @@ export const SallaOrderDataSchema = z.object({
   notes: z.string().optional().nullable()
 });
 
-export const SallaWebhookPayloadSchema = z.object({
-  event: z.enum(['order.created', 'order.updated', 'order.refunded', 'order.cancelled']),
-  merchant: z.number().or(z.string()),
-  created_at: z.string(),
-  data: SallaOrderDataSchema
-});
+export const SallaSubscriptionDataSchema = z.object({
+  plan_name: z.string().optional().default('standard'),
+  status: z.string().optional().default('active'),
+  expires_at: z.string().optional().nullable()
+}).passthrough();
+
+export const SallaWebhookPayloadSchema = z.discriminatedUnion('event', [
+  z.object({
+    event: z.literal('order.created'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaOrderDataSchema
+  }),
+  z.object({
+    event: z.literal('order.updated'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaOrderDataSchema
+  }),
+  z.object({
+    event: z.literal('order.refunded'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaOrderDataSchema
+  }),
+  z.object({
+    event: z.literal('order.cancelled'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaOrderDataSchema
+  }),
+  z.object({
+    event: z.literal('app.subscription.started'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaSubscriptionDataSchema
+  }),
+  z.object({
+    event: z.literal('app.subscription.renewed'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaSubscriptionDataSchema
+  }),
+  z.object({
+    event: z.literal('app.subscription.expired'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaSubscriptionDataSchema
+  }),
+  z.object({
+    event: z.literal('app.subscription.canceled'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaSubscriptionDataSchema
+  }),
+  z.object({
+    event: z.literal('app.uninstalled'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaSubscriptionDataSchema
+  })
+]);
 
 export type SallaWebhookPayload = z.infer<typeof SallaWebhookPayloadSchema>;
 export type SallaOrderData = z.infer<typeof SallaOrderDataSchema>;

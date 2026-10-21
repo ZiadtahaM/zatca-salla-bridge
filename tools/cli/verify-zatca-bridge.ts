@@ -270,6 +270,131 @@ async function runLever(): Promise<void> {
       return `Accept-Version=${headers['Accept-Version']}, 409Verdict=${verdict.kind}`;
     });
 
+    await step('8. SaaS Gap 1: Merchant Self-Service Web Portal GET /portal (4 Tabs + Pre-fill)', async () => {
+      const portalRes = await app.inject({
+        method: 'GET',
+        url: `/portal?merchantId=${merchantId}`
+      });
+      assert.equal(portalRes.statusCode, 200);
+      const html = portalRes.payload;
+      assert.ok(html.includes('1. التفعيل الفوري (1-Click ZATCA)'));
+      assert.ok(html.includes('2. طابور فواتير الشركات B2B'));
+      assert.ok(html.includes('3. سجل الفواتير'));
+      assert.ok(html.includes('4. صحة الختم والـ DLQ'));
+      return `portalBytes=${portalRes.payload.length}, status=200, 4TabsVerified=true`;
+    });
+
+    await step('9. SaaS Gap 2: Automated Salla OAuth 14-Day Token Refresh', async () => {
+      const client = await pool.connect();
+      try {
+        const pastDate = new Date(Date.now() + 10 * 3600 * 1000);
+        await client.query(`UPDATE merchant_tokens SET expires_at = $1 WHERE merchant_id = $2`, [pastDate.toISOString(), merchantId]);
+        const mockFetch = async () => ({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            access_token: `refreshed_access_${runId}`,
+            refresh_token: `refreshed_refresh_${runId}`,
+            expires_in: 1209600
+          })
+        });
+        const refreshed = await (await import('../../src/services/salla-oauth.js')).refreshSallaTokenIfNeeded(
+          client,
+          merchantId,
+          false,
+          mockFetch as any
+        );
+        assert.equal(refreshed?.accessToken, `refreshed_access_${runId}`);
+        return `refreshedToken=${refreshed?.accessToken.slice(0, 20)}..., expiresAt=${refreshed?.expiresAt.toISOString()}`;
+      } finally {
+        client.release();
+      }
+    });
+
+    await step('10. SaaS Gap 3: ZATCA 3-Environment Base URLs & Non-Destructive CSID Renewal', async () => {
+      const { getZatcaBaseUrl } = await import('../../src/services/csr-generator.js');
+      assert.equal(getZatcaBaseUrl('sandbox'), 'https://gw-fatoora.zatca.gov.sa/e-invoicing/developer-portal');
+      assert.equal(getZatcaBaseUrl('simulation'), 'https://gw-fatoora.zatca.gov.sa/e-invoicing/simulation');
+      assert.equal(getZatcaBaseUrl('production'), 'https://gw-fatoora.zatca.gov.sa/e-invoicing/core');
+
+      const renewRes = await app.inject({
+        method: 'POST',
+        url: `/api/egs/${egsUnitId}/renew`,
+        payload: { otp: '887766' }
+      });
+      assert.equal(renewRes.statusCode, 200);
+      const renewJson = JSON.parse(renewRes.body);
+      assert.equal(renewJson.status, 'renewed');
+      return `renewed=${renewJson.status}, currentIcvPreserved=${renewJson.current_icv}`;
+    });
+
+    await step('11. SaaS Gap 4: Real Fatoora Dispatcher (Clearance, Reporting, DLQ & Salla History)', async () => {
+      const { submitInvoiceToFatoora, notifySallaOrderTimeline } = await import('../../src/services/fatoora-dispatcher.js');
+      const client = await pool.connect();
+      try {
+        const mockHttpClient = async () => ({
+          statusCode: 200,
+          headers: { 'content-type': 'application/json' },
+          rawBody: JSON.stringify({
+            clearanceStatus: 'CLEARED',
+            clearedInvoice: Buffer.from('<cleared-xml/>', 'utf8').toString('base64'),
+            qrSellertag: 'updated-qr'
+          })
+        });
+        const dispatchRes = await submitInvoiceToFatoora(client, b2cInvoiceId, { httpClient: mockHttpClient });
+        assert.equal(dispatchRes.status, 'reported');
+
+        const mockSallaFetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'success' }) });
+        const notified = await notifySallaOrderTimeline(client, merchantId, 'order_123', b2cInvoiceUuid, undefined, undefined, mockSallaFetch as any);
+        assert.equal(notified, true);
+        return `dispatchStatus=${dispatchRes.status}, sallaTimelineNotified=${notified}`;
+      } finally {
+        client.release();
+      }
+    });
+
+    await step('12. SaaS Gap 5: Automated Salla App Store Billing Lifecycle & HTTP 402 Gate', async () => {
+      const cancelRes = await app.inject({
+        method: 'POST',
+        url: '/webhooks/salla',
+        payload: {
+          event: 'app.subscription.canceled',
+          merchant: merchantId,
+          created_at: new Date().toISOString(),
+          data: { plan_name: 'standard', status: 'canceled' }
+        }
+      });
+      assert.equal(cancelRes.statusCode, 200);
+
+      const blockedRes = await app.inject({
+        method: 'POST',
+        url: '/webhooks/salla',
+        payload: {
+          event: 'order.created',
+          merchant: merchantId,
+          created_at: new Date().toISOString(),
+          data: {
+            id: 998877,
+            date: { date: '2026-10-21 12:00:00', timezone: 'Asia/Riyadh' },
+            status: { id: 1, name: 'created', slug: 'completed' },
+            payment_method: 'credit_card',
+            currency: 'SAR',
+            amounts: {
+              sub_total: { amount: 100, currency: 'SAR' },
+              tax: { percent: 15, amount: { amount: 15, currency: 'SAR' } },
+              total: { amount: 115, currency: 'SAR' }
+            },
+            customer: { id: 1, first_name: 'Test', last_name: 'User' },
+            items: [{ id: 1, name: 'Item', quantity: 1, price: { amount: 100, currency: 'SAR' }, total: { amount: 115, currency: 'SAR' } }]
+          }
+        }
+      });
+      assert.equal(blockedRes.statusCode, 402);
+      const blockedJson = JSON.parse(blockedRes.body);
+      assert.equal(blockedJson.code, 'SUBSCRIPTION_INACTIVE');
+      return `cancelEvent=200, blockedUnpaidOrder=402, code=${blockedJson.code}`;
+    });
+
     process.stdout.write('\n=== PSTACK POTETO-MODE VERIFICATION LEVER: ALL GATES GREEN ===\n');
     console.table(results);
   } finally {

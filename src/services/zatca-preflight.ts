@@ -47,7 +47,7 @@ const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_REGEX = /^\d{2}:\d{2}:\d{2}(?:Z)?$/;
 const BASE64_SHA256_REGEX = /^([A-Za-z0-9+/]{43}=|NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODU4ZjgyYTgwMjdhMDY1ZDE4MGNkNGI3Nzg4MzBkNWU1NTc1OWQ2ODU5Nw==)$/;
 
-export function validateZatcaPreflight(content: string, format: 'xml' | 'salla_json' = 'xml'): PreflightValidationResult {
+export function validateZatcaPreflight(content: string, format: 'xml' | 'salla_json' = 'xml', options?: { checkLateReporting?: boolean; referenceTimestamp?: Date }): PreflightValidationResult {
   const findings: PreflightFinding[] = [];
   let totalChecks = 0;
   let passedChecks = 0;
@@ -272,15 +272,17 @@ export function validateZatcaPreflight(content: string, format: 'xml' | 'salla_j
   // 6. Currency codes
   const docCurrency = getElementText(xmlDoc, 'DocumentCurrencyCode');
   const taxCurrency = getElementText(xmlDoc, 'TaxCurrencyCode');
-  recordCheck(docCurrency === 'SAR', {
+  const ISO_CURRENCIES = ['SAR', 'USD', 'EUR', 'AED', 'KWD', 'GBP', 'BHD', 'OMR', 'QAR', 'EGP'];
+  const isValidDocCurrency = docCurrency !== null && ISO_CURRENCIES.includes(docCurrency);
+  recordCheck(isValidDocCurrency, {
     code: 'BR-KSA-25-DOC-CURRENCY',
     severity: 'ERROR',
     category: 'BUSINESS_RULES',
     field: 'cbc:DocumentCurrencyCode',
-    messageEn: 'DocumentCurrencyCode must be SAR.',
-    messageAr: 'عملة الفاتورة يجب أن تكون بالريال السعودي (SAR).',
-    resolutionEn: 'Set cbc:DocumentCurrencyCode to SAR.',
-    resolutionAr: 'عين رمز العملة SAR.',
+    messageEn: `DocumentCurrencyCode must be a recognized currency (received "${docCurrency}").`,
+    messageAr: `عملة الفاتورة يجب أن تكون مقبولة (المستلم "${docCurrency}").`,
+    resolutionEn: 'Set cbc:DocumentCurrencyCode to a valid ISO 4217 currency code.',
+    resolutionAr: 'عين رمز عملة معتمد مثل SAR أو USD.',
     fineImpactSar: 5000
   });
   recordCheck(taxCurrency === 'SAR', {
@@ -288,12 +290,35 @@ export function validateZatcaPreflight(content: string, format: 'xml' | 'salla_j
     severity: 'ERROR',
     category: 'BUSINESS_RULES',
     field: 'cbc:TaxCurrencyCode',
-    messageEn: 'TaxCurrencyCode must be SAR.',
-    messageAr: 'عملة احتساب الضريبة يجب أن تكون بالريال السعودي (SAR).',
+    messageEn: 'TaxCurrencyCode must always remain SAR even for foreign currency invoices.',
+    messageAr: 'عملة احتساب الضريبة يجب أن تكون دائماً بالريال السعودي (SAR) حتى للفواتير بالعملات الأجنبية.',
     resolutionEn: 'Set cbc:TaxCurrencyCode to SAR.',
     resolutionAr: 'عين عملة الضريبة SAR.',
     fineImpactSar: 5000
   });
+
+  if (docCurrency && docCurrency !== 'SAR') {
+    const taxTotals = xmlDoc.getElementsByTagName('cac:TaxTotal');
+    let hasSarTaxTotal = false;
+    for (let i = 0; i < taxTotals.length; i++) {
+      const taxAmtElem = taxTotals.item(i)?.getElementsByTagName('cbc:TaxAmount').item(0);
+      if (taxAmtElem?.getAttribute('currencyID') === 'SAR') {
+        hasSarTaxTotal = true;
+        break;
+      }
+    }
+    recordCheck(hasSarTaxTotal, {
+      code: 'BR-KSA-25-FOREIGN-TAX-TOTAL-SAR',
+      severity: 'ERROR',
+      category: 'BUSINESS_RULES',
+      field: 'cac:TaxTotal',
+      messageEn: `Foreign currency invoice (${docCurrency}) must have a root cac:TaxTotal with TaxAmount currencyID="SAR".`,
+      messageAr: `فاتورة العملة الأجنبية (${docCurrency}) يجب أن تحتوي على إجمالي ضريبي بالريال السعودي (SAR).`,
+      resolutionEn: 'Include a root cac:TaxTotal converting the tax amount to SAR using the official exchange rate.',
+      resolutionAr: 'أضف حقل إجمالي الضريبة محولاً للريال السعودي باستخدام سعر الصرف الرسمي.',
+      fineImpactSar: 5000
+    });
+  }
 
   // 7. Supplier Party & VAT number
   const supplierParty = xmlDoc.getElementsByTagName('cac:AccountingSupplierParty').item(0) ||
@@ -379,17 +404,36 @@ export function validateZatcaPreflight(content: string, format: 'xml' | 'salla_j
       fineImpactSar: 10000
     });
 
-    recordCheck(VAT_REGEX.test(customerVat), {
-      code: 'BR-KSA-09',
-      severity: 'ERROR',
-      category: 'BUSINESS_RULES',
-      field: 'cac:AccountingCustomerParty/.../cbc:CompanyID',
-      messageEn: `Buyer VAT number "${customerVat}" is invalid for standard B2B invoice.`,
-      messageAr: `الرقم الضريبي للعميل "${customerVat}" غير صالح للفاتورة القياسية B2B. يجب أن يكون 15 رقماً يبدأ وينتهي بـ 3.`,
-      resolutionEn: 'Verify and supply the corporate buyer 15-digit VAT number.',
-      resolutionAr: 'تحقق من صحة الرقم الضريبي للمشتري المكون من 15 رقماً.',
-      fineImpactSar: 10000
-    });
+    const customerCountry = customerParty ? getElementText(customerParty, 'IdentificationCode') : '';
+    const isDomesticBuyer = !customerCountry || customerCountry.toUpperCase() === 'SA';
+    const customerOtherId = customerParty ? (customerParty.getElementsByTagName('cbc:ID').item(0)?.textContent || '') : '';
+
+    if (isDomesticBuyer) {
+      recordCheck(VAT_REGEX.test(customerVat), {
+        code: 'BR-KSA-09',
+        severity: 'ERROR',
+        category: 'BUSINESS_RULES',
+        field: 'cac:AccountingCustomerParty/.../cbc:CompanyID',
+        messageEn: `Buyer VAT number "${customerVat}" is invalid for standard B2B invoice.`,
+        messageAr: `الرقم الضريبي للعميل "${customerVat}" غير صالح للفاتورة القياسية B2B. يجب أن يكون 15 رقماً يبدأ وينتهي بـ 3.`,
+        resolutionEn: 'Verify and supply the corporate buyer 15-digit VAT number.',
+        resolutionAr: 'تحقق من صحة الرقم الضريبي للمشتري المكون من 15 رقماً.',
+        fineImpactSar: 10000
+      });
+    } else {
+      const hasForeignId = customerOtherId.length > 0 || customerVat.length > 0;
+      recordCheck(hasForeignId, {
+        code: 'BR-KSA-F-08',
+        severity: 'ERROR',
+        category: 'BUSINESS_RULES',
+        field: 'cac:AccountingCustomerParty/.../cbc:ID',
+        messageEn: `Non-Saudi buyer in ${customerCountry} must have an identification ID (schemeID="OTH", "TIN", or "PAS").`,
+        messageAr: `العميل غير السعودي في دولة ${customerCountry} يجب أن يحمل معرف هوية (schemeID="OTH" أو "TIN" أو "PAS").`,
+        resolutionEn: 'Provide foreign buyer tax ID, commercial register, or other identification with schemeID="OTH".',
+        resolutionAr: 'أدخل المعرف الضريبي أو التجاري الأجنبي مع ترميز schemeID="OTH".',
+        fineImpactSar: 5000
+      });
+    }
   }
 
   // 9. Credit Note BillingReference check
@@ -519,10 +563,18 @@ export function validateZatcaPreflight(content: string, format: 'xml' | 'salla_j
     fineImpactSar: 5000
   });
 
-  // Extract TaxTotal TaxAmount
+  // Extract TaxTotal TaxAmount in invoice document currency
   const taxTotalNodes = xmlDoc.getElementsByTagName('cac:TaxTotal');
   let declaredVatAmount = 0;
-  if (taxTotalNodes.length > 0) {
+  for (let i = 0; i < taxTotalNodes.length; i++) {
+    const node = taxTotalNodes.item(i);
+    const amtElem = node?.getElementsByTagName('cbc:TaxAmount').item(0);
+    if (amtElem && (amtElem.getAttribute('currencyID') === docCurrency || (node?.getElementsByTagName('cac:TaxSubtotal').length || 0) > 0)) {
+      declaredVatAmount = parseFloat(amtElem.textContent || '0');
+      break;
+    }
+  }
+  if (declaredVatAmount === 0 && taxTotalNodes.length > 0) {
     declaredVatAmount = parseFloat(getElementText(taxTotalNodes.item(0)!, 'TaxAmount') || '0');
   }
 
@@ -537,6 +589,44 @@ export function validateZatcaPreflight(content: string, format: 'xml' | 'salla_j
     resolutionAr: 'احسب المبلغ الإجمالي بجمع صافي المبلغ مع قيمة ضريبة القيمة المضافة.',
     fineImpactSar: 5000
   });
+
+  const prepaidAmountText = legalTotal ? getElementText(legalTotal, 'PrepaidAmount') : '';
+  const prepaidAmount = prepaidAmountText ? parseFloat(prepaidAmountText) : 0;
+  recordCheck(Math.abs((taxInclusiveAmount - prepaidAmount) - payableAmount) < 0.02, {
+    code: 'BR-CO-16',
+    severity: 'ERROR',
+    category: 'TAX_MATH',
+    field: 'cac:LegalMonetaryTotal/cbc:PayableAmount',
+    messageEn: `PayableAmount (${payableAmount.toFixed(2)}) must equal TaxInclusiveAmount (${taxInclusiveAmount.toFixed(2)}) minus PrepaidAmount (${prepaidAmount.toFixed(2)}).`,
+    messageAr: `المبلغ المستحق للدفع (${payableAmount.toFixed(2)}) يجب أن يساوي المبلغ شامل الضريبة (${taxInclusiveAmount.toFixed(2)}) مطروحاً منه الدفعة المقدمة (${prepaidAmount.toFixed(2)}).`,
+    resolutionEn: 'Ensure PayableAmount strictly equals TaxInclusiveAmount minus PrepaidAmount.',
+    resolutionAr: 'تأكد من أن المبلغ المستحق يساوي المبلغ الإجمالي مخصوماً منه الدفعات المقدمة.',
+    fineImpactSar: 5000
+  });
+
+  if (options?.checkLateReporting && docType === 'Simplified' && issueDate && issueTime) {
+    try {
+      const cleanTime = issueTime.replace(/Z$/, '');
+      const docDate = new Date(`${issueDate}T${cleanTime}Z`);
+      const refDate = options.referenceTimestamp || new Date();
+      const diffHours = (refDate.getTime() - docDate.getTime()) / (1000 * 60 * 60);
+      if (diffHours > 24) {
+        findings.push({
+          code: 'BR-KSA-98',
+          severity: 'WARNING',
+          category: 'BUSINESS_RULES',
+          field: 'cbc:IssueDate',
+          messageEn: `The simplified invoice was issued ${Math.round(diffHours)} hours ago. ZATCA regulations mandate reporting within 24 hours of issuance.`,
+          messageAr: `تم إصدار الفاتورة المبسطة منذ ${Math.round(diffHours)} ساعة. تتطلب لوائح الزكاة والضريبة الإبلاغ عنها خلال 24 ساعة من تاريخ الإصدار (BR-KSA-98).`,
+          resolutionEn: 'Submit simplified invoices to ZATCA reporting within 24 hours to prevent compliance penalties.',
+          resolutionAr: 'أرسل الفواتير المبسطة إلى منصة فاتورة خلال 24 ساعة من إصدارها لتجنب غرامات التأخير.',
+          fineImpactSar: 0
+        });
+      }
+    } catch {
+      // ignore date parse error
+    }
+  }
 
   // 12. QR Code Inspection if present
   let tlvInspection: TlvInspection | undefined;

@@ -86,6 +86,152 @@ export function validateB2bBuyerAddress(order: SallaOrderData): B2bAddressValida
   };
 }
 
+export interface HalalaReconciledLine {
+  id: number;
+  name: string;
+  quantity: number;
+  unitPrice: number;
+  lineExtension: number;
+  taxAmount: number;
+  taxPercent: number;
+  taxCategory: string;
+  exemptionXml: string;
+  grossAmount: number;
+}
+
+export interface HalalaReconciliationResult {
+  isVatInclusivePrices: boolean;
+  driftHalalas: number;
+  lineExtensionTotal: number;
+  allowanceTotal: number;
+  chargeTotal: number;
+  taxExclusiveAmount: number;
+  taxTotalAmount: number;
+  grandTotal: number;
+  reconciledLines: HalalaReconciledLine[];
+}
+
+export function reconcileHalalaRounding(
+  order: SallaOrderData,
+  isExport: boolean = false,
+  docCurrency: string = 'SAR'
+): HalalaReconciliationResult {
+  const discountAmount = order.amounts.discounts?.amount || 0;
+  const shippingAmount = order.amounts.shipping_cost?.amount || 0;
+  const codAmount = order.amounts.cash_on_delivery?.amount || 0;
+  const chargeAmount = shippingAmount + codAmount;
+
+  let rawItemsSum = 0;
+  for (const it of order.items) {
+    rawItemsSum += it.price.amount * it.quantity;
+  }
+
+  const sallaTotal = order.amounts.total.amount;
+  const sallaSubtotal = order.amounts.sub_total.amount;
+  const sallaTax = order.amounts.tax.amount.amount;
+
+  const isVatInclusivePrices =
+    (order as any).prices_include_tax === true ||
+    (order as any).price_includes_tax === true ||
+    (Math.abs(rawItemsSum - sallaTotal) < 0.05 && sallaTax > 0) ||
+    (Math.abs(rawItemsSum - (sallaTotal - chargeAmount + discountAmount)) < 0.05 && sallaTax > 0);
+
+  let calculatedTaxTotal = 0;
+  let calculatedLineExtensionTotal = 0;
+  const lines: HalalaReconciledLine[] = [];
+
+  for (let i = 0; i < order.items.length; i++) {
+    const item = order.items[i];
+    const lineNum = i + 1;
+
+    const isGiftVoucher =
+      (item as any).is_voucher === true ||
+      (item as any).type === 'voucher_multi_purpose' ||
+      (item.name &&
+        (item.name.includes('كوبون') ||
+          item.name.includes('قسيمة') ||
+          item.name.toLowerCase().includes('voucher') ||
+          item.name.toLowerCase().includes('gift card')));
+
+    let lineTaxCategory = 'S';
+    let lineTaxPercent = 15.0;
+    let exemptionXml = '';
+
+    if (isGiftVoucher) {
+      lineTaxCategory = 'O';
+      lineTaxPercent = 0.0;
+      exemptionXml = `\n        <cbc:TaxExemptionReasonCode>VATEX-SA-OOS</cbc:TaxExemptionReasonCode>\n        <cbc:TaxExemptionReason>Not subject to VAT - Multi-purpose voucher</cbc:TaxExemptionReason>`;
+    } else if (isExport) {
+      lineTaxCategory = 'Z';
+      lineTaxPercent = 0.0;
+      exemptionXml = `\n        <cbc:TaxExemptionReasonCode>VATEX-SA-32</cbc:TaxExemptionReasonCode>\n        <cbc:TaxExemptionReason>Export of goods outside GCC</cbc:TaxExemptionReason>`;
+    }
+
+    let unitPrice = item.price.amount;
+    if (isVatInclusivePrices && !isGiftVoucher && !isExport) {
+      unitPrice = Number((item.price.amount / 1.15).toFixed(4));
+    }
+
+    const lineExtension = isVatInclusivePrices
+      ? Number((unitPrice * item.quantity).toFixed(2))
+      : Number((item.price.amount * item.quantity).toFixed(2));
+
+    const lineTaxAmount =
+      lineTaxCategory === 'S' ? Number((lineExtension * (lineTaxPercent / 100)).toFixed(2)) : 0;
+    const lineGross = Number((lineExtension + lineTaxAmount).toFixed(2));
+
+    calculatedLineExtensionTotal += lineExtension;
+    calculatedTaxTotal += lineTaxAmount;
+
+    lines.push({
+      id: lineNum,
+      name: item.name.trim().normalize('NFC'),
+      quantity: item.quantity,
+      unitPrice,
+      lineExtension,
+      taxAmount: lineTaxAmount,
+      taxPercent: lineTaxPercent,
+      taxCategory: lineTaxCategory,
+      exemptionXml,
+      grossAmount: lineGross
+    });
+  }
+
+  let lineExtTotal = isVatInclusivePrices
+    ? Number(calculatedLineExtensionTotal.toFixed(2))
+    : sallaSubtotal;
+  let taxExclusive = Number((lineExtTotal - discountAmount + chargeAmount).toFixed(2));
+  let finalTax = Number(calculatedTaxTotal.toFixed(2));
+  if (!isExport && !isVatInclusivePrices && sallaTax > 0) {
+    finalTax = sallaTax;
+  }
+
+  let finalGrandTotal = Number((taxExclusive + finalTax).toFixed(2));
+  const drift = Number((sallaTotal - finalGrandTotal).toFixed(2));
+
+  if (Math.abs(drift) > 0 && Math.abs(drift) <= 0.05) {
+    const lastTaxableLine = [...lines].reverse().find(l => l.taxCategory === 'S');
+    if (lastTaxableLine) {
+      lastTaxableLine.taxAmount = Number((lastTaxableLine.taxAmount + drift).toFixed(2));
+      lastTaxableLine.grossAmount = Number((lastTaxableLine.lineExtension + lastTaxableLine.taxAmount).toFixed(2));
+      finalTax = Number((finalTax + drift).toFixed(2));
+      finalGrandTotal = Number((taxExclusive + finalTax).toFixed(2));
+    }
+  }
+
+  return {
+    isVatInclusivePrices,
+    driftHalalas: Math.round(drift * 100),
+    lineExtensionTotal: lineExtTotal,
+    allowanceTotal: discountAmount,
+    chargeTotal: chargeAmount,
+    taxExclusiveAmount: taxExclusive,
+    taxTotalAmount: finalTax,
+    grandTotal: finalGrandTotal,
+    reconciledLines: lines
+  };
+}
+
 export interface BuildUblXmlOptions {
   order: SallaOrderData;
   uuid: string;
@@ -183,15 +329,17 @@ export function buildUblXmlFromSallaOrder(options: BuildUblXmlOptions): string {
   </cac:AccountingCustomerParty>`;
   }
 
-  const discountAmount = options.order.amounts.discounts?.amount || 0;
-  const shippingAmount = options.order.amounts.shipping_cost?.amount || 0;
-  const codAmount = options.order.amounts.cash_on_delivery?.amount || 0;
-  const chargeAmount = shippingAmount + codAmount;
-
-  const lineExtensionTotal = options.order.amounts.sub_total.amount;
-  const allowanceTotal = discountAmount;
-  const chargeTotal = chargeAmount;
-  const taxExclusiveAmount = Number((lineExtensionTotal - allowanceTotal + chargeTotal).toFixed(2));
+  const reconciliation = reconcileHalalaRounding(options.order, isExport, docCurrency);
+  const discountAmount = reconciliation.allowanceTotal;
+  const chargeTotal = reconciliation.chargeTotal;
+  const lineExtensionTotal = reconciliation.lineExtensionTotal;
+  const allowanceTotal = reconciliation.allowanceTotal;
+  const taxExclusiveAmount = reconciliation.taxExclusiveAmount;
+  let declaredTaxTotal = reconciliation.taxTotalAmount;
+  const grandTotal = reconciliation.grandTotal;
+  const prepaidAmount = options.prepaidAmount || 0;
+  const payableAmount = Number((grandTotal - prepaidAmount).toFixed(2));
+  const hasGiftVoucher = reconciliation.reconciledLines.some(l => l.taxCategory === 'O');
 
   let allowanceChargeXml = '';
   if (allowanceTotal > 0) {
@@ -224,73 +372,33 @@ export function buildUblXmlFromSallaOrder(options: BuildUblXmlOptions): string {
   </cac:AllowanceCharge>\n`;
   }
 
-  let calculatedTaxTotal = 0;
-  let hasGiftVoucher = false;
-
-  const linesXml = options.order.items
-    .map((item: SallaOrderItem, index: number) => {
-      const lineNum = index + 1;
-      const itemPrice = item.price.amount.toFixed(2);
-      const lineExtension = Number((item.price.amount * item.quantity).toFixed(2));
-      
-      const isGiftVoucher = (item as any).is_voucher === true || 
-                            (item as any).type === 'voucher_multi_purpose' || 
-                            (item.name && (item.name.includes('كوبون') || item.name.includes('قسيمة') || item.name.toLowerCase().includes('voucher') || item.name.toLowerCase().includes('gift card')));
-
-      let lineTaxCategory = 'S';
-      let lineTaxPercent = 15.00;
-      let lineTaxAmount = Number((lineExtension * 0.15).toFixed(2));
-      let exemptionXml = '';
-
-      if (isGiftVoucher) {
-        hasGiftVoucher = true;
-        lineTaxCategory = 'O';
-        lineTaxPercent = 0.00;
-        lineTaxAmount = 0.00;
-        exemptionXml = `\n        <cbc:TaxExemptionReasonCode>VATEX-SA-OOS</cbc:TaxExemptionReasonCode>\n        <cbc:TaxExemptionReason>Not subject to VAT - Multi-purpose voucher</cbc:TaxExemptionReason>`;
-      } else if (isExport) {
-        lineTaxCategory = 'Z';
-        lineTaxPercent = 0.00;
-        lineTaxAmount = 0.00;
-        exemptionXml = `\n        <cbc:TaxExemptionReasonCode>VATEX-SA-32</cbc:TaxExemptionReasonCode>\n        <cbc:TaxExemptionReason>Export of goods outside GCC</cbc:TaxExemptionReason>`;
-      }
-
-      calculatedTaxTotal += lineTaxAmount;
-      const lineGross = (lineExtension + lineTaxAmount).toFixed(2);
-      const itemName = item.name.trim().normalize('NFC');
-
+  const linesXml = reconciliation.reconciledLines
+    .map(line => {
+      const formattedUnitPrice = (line.lineExtension / line.quantity).toFixed(2);
       return `  <cac:InvoiceLine>
-    <cbc:ID>${lineNum}</cbc:ID>
-    <cbc:InvoicedQuantity unitCode="PCE">${item.quantity}</cbc:InvoicedQuantity>
-    <cbc:LineExtensionAmount currencyID="${docCurrency}">${lineExtension.toFixed(2)}</cbc:LineExtensionAmount>
+    <cbc:ID>${line.id}</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="PCE">${line.quantity}</cbc:InvoicedQuantity>
+    <cbc:LineExtensionAmount currencyID="${docCurrency}">${line.lineExtension.toFixed(2)}</cbc:LineExtensionAmount>
     <cac:TaxTotal>
-      <cbc:TaxAmount currencyID="${docCurrency}">${lineTaxAmount.toFixed(2)}</cbc:TaxAmount>
-      <cbc:RoundingAmount currencyID="${docCurrency}">${lineGross}</cbc:RoundingAmount>
+      <cbc:TaxAmount currencyID="${docCurrency}">${line.taxAmount.toFixed(2)}</cbc:TaxAmount>
+      <cbc:RoundingAmount currencyID="${docCurrency}">${line.grossAmount.toFixed(2)}</cbc:RoundingAmount>
     </cac:TaxTotal>
     <cac:Item>
-      <cbc:Name>${itemName}</cbc:Name>
+      <cbc:Name>${line.name}</cbc:Name>
       <cac:ClassifiedTaxCategory>
-        <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">${lineTaxCategory}</cbc:ID>
-        <cbc:Percent>${lineTaxPercent.toFixed(2)}</cbc:Percent>${exemptionXml}
+        <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">${line.taxCategory}</cbc:ID>
+        <cbc:Percent>${line.taxPercent.toFixed(2)}</cbc:Percent>${line.exemptionXml}
         <cac:TaxScheme>
           <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5153">VAT</cbc:ID>
         </cac:TaxScheme>
       </cac:ClassifiedTaxCategory>
     </cac:Item>
     <cac:Price>
-      <cbc:PriceAmount currencyID="${docCurrency}">${itemPrice}</cbc:PriceAmount>
+      <cbc:PriceAmount currencyID="${docCurrency}">${formattedUnitPrice}</cbc:PriceAmount>
     </cac:Price>
   </cac:InvoiceLine>`;
     })
     .join('\n');
-
-  let declaredTaxTotal = options.order.amounts.tax.amount.amount;
-  if (isExport || hasGiftVoucher) {
-    declaredTaxTotal = Number(calculatedTaxTotal.toFixed(2));
-  }
-  const grandTotal = Number((taxExclusiveAmount + declaredTaxTotal).toFixed(2));
-  const prepaidAmount = options.prepaidAmount || 0;
-  const payableAmount = Number((grandTotal - prepaidAmount).toFixed(2));
 
   let advanceReferenceXml = '';
   if (options.advanceInvoiceId || options.advanceInvoiceUuid) {
@@ -884,6 +992,210 @@ export async function processSallaRefundIntoZatcaCreditNote(
         lineExtensionTotal,
         declaredTaxTotal,
         grandTotal
+      ]
+    );
+
+    await client.query(
+      `UPDATE egs_units 
+       SET current_icv = $1, 
+           last_document_hash = $2, 
+           updated_at = NOW() 
+       WHERE id = $3`,
+      [nextIcv, signed.invoiceHashBase64, egs.id]
+    );
+
+    await client.query('COMMIT');
+
+    return {
+      invoiceId: cnRes.rows[0].id,
+      invoiceUuid: creditNoteUuid,
+      icv: nextIcv,
+      pih: currentPih,
+      invoiceHash: signed.invoiceHashBase64,
+      qrCodeBase64: signed.qrCodeBase64,
+      signedXml: signed.signedXml,
+      isB2C
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  }
+}
+
+export interface ProcessPartialCreditNoteOptions {
+  originalInvoiceId: string;
+  refundAmount: number;
+  returnReason?: string;
+  items?: Array<{ name: string; quantity: number; price: number }>;
+  idempotencyKey?: string;
+}
+
+export async function processPartialCreditNote(
+  client: PoolClient,
+  egsUnitId: string,
+  options: ProcessPartialCreditNoteOptions
+): Promise<GeneratedInvoiceResult> {
+  const returnReason = options.returnReason || 'Partial customer refund';
+  const now = new Date();
+  const issueDate = now.toISOString().split('T')[0];
+  const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
+  const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
+  const creditNoteUuid = crypto.randomUUID();
+
+  await client.query('BEGIN');
+
+  try {
+    const origRes = await client.query(
+      `SELECT id, uuid, icv, status, grand_total, currency, invoice_type, order_id 
+       FROM invoices 
+       WHERE id = $1 OR uuid = $1
+       LIMIT 1`,
+      [options.originalInvoiceId]
+    );
+
+    if (origRes.rows.length === 0) {
+      throw new Error(`Original invoice ${options.originalInvoiceId} not found`);
+    }
+
+    const originalInvoice = origRes.rows[0];
+    const origGrandTotal = Number(originalInvoice.grand_total);
+
+    if (options.refundAmount <= 0) {
+      throw new Error('Refund amount must be strictly positive');
+    }
+    if (options.refundAmount > origGrandTotal) {
+      throw new Error(`Partial refund amount (${options.refundAmount}) cannot exceed original invoice total (${origGrandTotal})`);
+    }
+
+    const egsRes = await client.query(
+      `SELECT id, merchant_id, current_icv, last_document_hash, 
+              private_key_pem, csid_secret, certificate, expires_at, csid_environment
+       FROM egs_units 
+       WHERE id = $1 FOR UPDATE`,
+      [egsUnitId]
+    );
+
+    if (egsRes.rows.length === 0) {
+      throw new Error(`EGS Unit ${egsUnitId} not found`);
+    }
+
+    const egs = egsRes.rows[0];
+    const nextIcv = Number(egs.current_icv) + 1;
+    const currentPih = egs.last_document_hash;
+    const isB2C = originalInvoice.invoice_type === 'simplified_tax_invoice';
+
+    const netRefund = Number((options.refundAmount / 1.15).toFixed(2));
+    const vatRefund = Number((options.refundAmount - netRefund).toFixed(2));
+
+    const refundOrder: SallaOrderData = {
+      id: originalInvoice.order_id || `CN-${Date.now()}`,
+      reference_id: `REF-CN-${nextIcv}`,
+      date: { date: `${issueDate} ${issueTime}`, timezone: 'Asia/Riyadh' },
+      status: { id: 1, name: 'Refunded', slug: 'refunded' },
+      payment_method: 'credit_card',
+      currency: originalInvoice.currency || 'SAR',
+      customer: {
+        id: 1,
+        first_name: 'Customer',
+        tax_number: isB2C ? null : '300075588700003'
+      },
+      items: options.items && options.items.length > 0
+        ? options.items.map((it, idx) => ({
+            id: idx + 1,
+            name: it.name,
+            quantity: it.quantity,
+            price: { amount: it.price, currency: originalInvoice.currency || 'SAR' },
+            total: { amount: Number((it.price * it.quantity).toFixed(2)), currency: originalInvoice.currency || 'SAR' }
+          }))
+        : [
+            {
+              id: 1,
+              name: `استرجاع جزئي / Partial Return: ${returnReason}`,
+              quantity: 1,
+              price: { amount: netRefund, currency: originalInvoice.currency || 'SAR' },
+              total: { amount: options.refundAmount, currency: originalInvoice.currency || 'SAR' }
+            }
+          ],
+      amounts: {
+        sub_total: { amount: netRefund, currency: originalInvoice.currency || 'SAR' },
+        tax: {
+          percent: 15,
+          amount: { amount: vatRefund, currency: originalInvoice.currency || 'SAR' }
+        },
+        total: { amount: options.refundAmount, currency: originalInvoice.currency || 'SAR' }
+      }
+    };
+
+    const rawCreditNoteXml = buildUblCreditNoteXmlFromSallaRefund({
+      order: refundOrder,
+      originalInvoiceUuid: originalInvoice.uuid,
+      originalIcv: Number(originalInvoice.icv),
+      returnReason,
+      uuid: creditNoteUuid,
+      icv: nextIcv,
+      pih: currentPih,
+      issueDate,
+      issueTime,
+      sellerNameArabic: 'شركة رواء للملابس الفاخرة',
+      sellerVat: '300075588700003',
+      sellerCrn: '1010010000',
+      isB2C
+    });
+
+    const privateKeyPem = decryptVaultSecret(egs.private_key_pem);
+    const signed = signZatcaInvoiceExact({
+      rawXml: rawCreditNoteXml,
+      privateKeyPem,
+      certPem: egs.certificate,
+      sellerNameArabic: 'شركة رواء للملابس الفاخرة',
+      sellerVatNumber: '300075588700003',
+      grandTotal: options.refundAmount.toFixed(2),
+      vatTotal: vatRefund.toFixed(2),
+      issueDateTimeIsoZ,
+      isB2C
+    });
+
+    const idempotency = options.idempotencyKey || `cn_part_${originalInvoice.id}_${Date.now()}`;
+
+    const cnRes = await client.query(
+      `INSERT INTO invoices (
+        egs_unit_id,
+        order_id,
+        idempotency_key,
+        invoice_type,
+        uuid,
+        icv,
+        pih,
+        invoice_hash,
+        qr_code_payload,
+        signed_xml,
+        status,
+        supply_date,
+        issue_timestamp,
+        replaces_invoice_id,
+        subtotal,
+        tax_total,
+        grand_total,
+        currency
+      ) VALUES ($1, $2, $3, 'credit_note', $4, $5, $6, $7, $8, $9, 'reported', $10, $11, $12, $13, $14, $15, $16)
+      RETURNING id, uuid, icv, status, grand_total, currency`,
+      [
+        egs.id,
+        originalInvoice.order_id,
+        idempotency,
+        creditNoteUuid,
+        nextIcv,
+        currentPih,
+        signed.invoiceHashBase64,
+        signed.qrCodeBase64,
+        signed.signedXml,
+        issueDate,
+        issueDateTimeIsoZ,
+        originalInvoice.id,
+        netRefund,
+        vatRefund,
+        options.refundAmount,
+        originalInvoice.currency || 'SAR'
       ]
     );
 

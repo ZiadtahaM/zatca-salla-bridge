@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { pool } from '../storage/db.js';
 import { submitInvoiceToFatoora } from '../services/fatoora-dispatcher.js';
+import { processPartialCreditNote } from '../services/invoice-generator.js';
 
 export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   app.get('/portal', async (request, reply) => {
@@ -105,6 +106,58 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
     } catch (err: any) {
       return reply.status(500).send({
         error: 'DISPATCH_FAILED',
+        message: err.message
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  app.post('/api/invoices/:id/partial-credit-note', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body as any) || {};
+    const refundAmount = Number(body.refundAmount);
+    const returnReason = body.returnReason || 'Partial Return / إشعار دائن جزئي';
+
+    if (!refundAmount || isNaN(refundAmount) || refundAmount <= 0) {
+      return reply.status(400).send({
+        error: 'INVALID_AMOUNT',
+        message: 'A valid positive refundAmount is required'
+      });
+    }
+
+    const client = await pool.connect();
+    try {
+      const invRes = await client.query(
+        `SELECT id, egs_unit_id, uuid, grand_total, status 
+         FROM invoices 
+         WHERE id = $1 OR uuid = $1 
+         LIMIT 1`,
+        [id]
+      );
+
+      if (invRes.rows.length === 0) {
+        return reply.status(404).send({
+          error: 'INVOICE_NOT_FOUND',
+          message: `Invoice ${id} not found`
+        });
+      }
+
+      const inv = invRes.rows[0];
+      const result = await processPartialCreditNote(client, inv.egs_unit_id, {
+        originalInvoiceId: inv.id,
+        refundAmount,
+        returnReason,
+        items: body.items
+      });
+
+      return reply.status(200).send({
+        success: true,
+        creditNote: result
+      });
+    } catch (err: any) {
+      return reply.status(400).send({
+        error: 'CREDIT_NOTE_FAILED',
         message: err.message
       });
     } finally {
@@ -356,6 +409,7 @@ function renderPortalHtml(data: {
                     <a href="/api/invoices/${inv.id}/pdf" target="_blank" class="btn btn-secondary btn-sm">PDF/A-3</a>
                     <a href="/api/invoices/${inv.id}/printable" target="_blank" class="btn btn-secondary btn-sm">عرض</a>
                     <button class="btn btn-primary btn-sm" onclick="dispatchInvoice('${inv.id}')">إرسال لهيئة الزكاة</button>
+                    ${inv.invoice_type !== 'credit_note' ? `<button class="btn btn-warning btn-sm" onclick="openPartialCreditModal('${inv.id}', '${inv.uuid}', ${inv.grand_total})">إشعار دائن (381)</button>` : ''}
                   </td>
                 </tr>
               `).join('')}
@@ -545,6 +599,33 @@ function renderPortalHtml(data: {
         }
       } catch (err) {
         alert('خطأ في الاتصال: ' + err.message);
+      }
+    }
+
+    async function openPartialCreditModal(invId, invUuid, grandTotal) {
+      const amountStr = prompt('أدخل مبلغ الاسترجاع الجزئي بالريال (الحد الأقصى: ' + grandTotal + ' ر.س):', (grandTotal / 2).toFixed(2));
+      if (!amountStr) return;
+      const refundAmount = parseFloat(amountStr);
+      if (isNaN(refundAmount) || refundAmount <= 0 || refundAmount > grandTotal) {
+        alert('مبلغ الاسترجاع غير صالح');
+        return;
+      }
+      const reason = prompt('سبب الاسترجاع (إشعار دائن 381):', 'استرجاع صنف معيب أو جزئي') || 'استرجاع جزئي';
+      try {
+        const res = await fetch('/api/invoices/' + invId + '/partial-credit-note', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refundAmount, returnReason: reason })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          alert('تم إصدار الإشعار الدائن 381 بنجاح! رقم الـ ICV: ' + data.creditNote.icv);
+          location.reload();
+        } else {
+          alert('فشل إصدار الإشعار الدائن: ' + (data.message || data.error));
+        }
+      } catch (err) {
+        alert('خطأ: ' + err.message);
       }
     }
   </script>

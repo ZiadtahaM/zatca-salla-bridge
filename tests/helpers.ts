@@ -266,8 +266,10 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       return { rows: [], rowCount: existing ? 1 : 0 };
     }
 
-    if (normalized.includes('FROM merchant_tokens WHERE merchant_id = $1')) {
-      const rows = merchantTokens.filter((t) => t.merchant_id === params[0]);
+    if (normalized.includes('FROM merchant_tokens')) {
+      const rows = normalized.includes('WHERE merchant_id = $1')
+        ? merchantTokens.filter((t) => t.merchant_id === params[0])
+        : merchantTokens;
       return { rows, rowCount: rows.length };
     }
 
@@ -641,8 +643,14 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       return { rows: [{ id }], rowCount: 1 };
     }
 
-    if (normalized.includes('FROM invoices') && (normalized.includes('WHERE id = $1') || normalized.includes('WHERE i.id = $1'))) {
-      const inv = invoices.find((i) => i.id === params[0]);
+    if (
+      normalized.includes('FROM invoices') &&
+      (normalized.includes('WHERE id = $1') ||
+        normalized.includes('WHERE i.id = $1') ||
+        normalized.includes('WHERE id = $1 OR uuid = $1') ||
+        normalized.includes('WHERE (id = $1 OR uuid = $1)'))
+    ) {
+      const inv = invoices.find((i) => i.id === params[0] || i.uuid === params[0]);
       if (!inv) {
         return { rows: [], rowCount: 0 };
       }
@@ -660,6 +668,14 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         ],
         rowCount: 1
       };
+    }
+
+    if (normalized.includes('SELECT * FROM invoices ORDER BY created_at ASC') || normalized.includes('SELECT * FROM invoices')) {
+      return { rows: invoices, rowCount: invoices.length };
+    }
+
+    if (normalized.includes('SELECT * FROM egs_units ORDER BY created_at ASC') || normalized.includes('SELECT * FROM egs_units')) {
+      return { rows: egsUnits, rowCount: egsUnits.length };
     }
 
     if (normalized.includes('INSERT INTO pending_b2b_orders')) {

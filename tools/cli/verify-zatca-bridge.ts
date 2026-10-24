@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { buildServer } from '../../src/server.js';
 import { pool, initializeDatabaseSchema } from '../../src/storage/db.js';
 import { validateZatcaPreflight } from '../../src/services/zatca-preflight.js';
 import { getZatcaOutboundHeaders, classifyGatewayResponse } from '../../src/services/outage-classifier.js';
 import { generateValidSecp256k1TestCert, attachStatefulRelationalTestDb } from '../../tests/helpers.js';
+import { reconcileHalalaRounding, buildUblXmlFromSallaOrder } from '../../src/services/invoice-generator.js';
+import { SallaOrderData } from '../../src/types/salla.js';
 
 interface LeverCheckResult {
   gate: string;
@@ -395,6 +398,145 @@ async function runLever(): Promise<void> {
       return `cancelEvent=200, blockedUnpaidOrder=402, code=${blockedJson.code}`;
     });
 
+    await step('13. Product Gap 1: Halala-Level VAT-Inclusive Rounding Reconciler (BR-CO-10 / BR-CO-15)', async () => {
+      const vatInclusiveOrder: SallaOrderData = {
+        id: Number(`50${runId.slice(-6)}`),
+        reference_id: `REF-HALALA-${runId.slice(-4)}`,
+        date: { date: '2026-10-21 14:00:00', timezone: 'Asia/Riyadh' },
+        status: { id: 1, name: 'Completed', slug: 'completed' },
+        payment_method: 'credit_card',
+        currency: 'SAR',
+        customer: { id: 501, first_name: 'ريان', last_name: 'القحطاني', tax_number: null },
+        amounts: {
+          sub_total: { amount: 86.95, currency: 'SAR' },
+          tax: { percent: 15, amount: { amount: 13.05, currency: 'SAR' } },
+          total: { amount: 100.0, currency: 'SAR' }
+        },
+        items: [
+          {
+            id: 1,
+            name: 'منتج تجريبي 1',
+            quantity: 1,
+            price: { amount: 33.33, currency: 'SAR' },
+            total: { amount: 33.33, currency: 'SAR' }
+          },
+          {
+            id: 2,
+            name: 'منتج تجريبي 2',
+            quantity: 1,
+            price: { amount: 33.33, currency: 'SAR' },
+            total: { amount: 33.33, currency: 'SAR' }
+          },
+          {
+            id: 3,
+            name: 'منتج تجريبي 3',
+            quantity: 1,
+            price: { amount: 33.34, currency: 'SAR' },
+            total: { amount: 33.34, currency: 'SAR' }
+          }
+        ]
+      };
+
+      const recon = reconcileHalalaRounding(vatInclusiveOrder);
+      assert.equal(recon.isVatInclusivePrices, true);
+      assert.equal(recon.grandTotal, 100.0);
+      assert.equal(Number((recon.taxExclusiveAmount + recon.taxTotalAmount).toFixed(2)), 100.0);
+
+      const xml = buildUblXmlFromSallaOrder({
+        order: vatInclusiveOrder,
+        uuid: randomUUID(),
+        icv: 999,
+        pih: createHash('sha256').update('pih_prev').digest('base64'),
+        issueDate: '2026-10-21',
+        issueTime: '14:00:00',
+        sellerNameArabic: 'شركة رواء للملابس الفاخرة',
+        sellerVat: '300075588700003',
+        sellerCrn: '1010010000',
+        isB2C: true
+      });
+
+      const audit = validateZatcaPreflight(xml, 'xml');
+      assert.equal(audit.valid, true);
+      return `reconciledGrandTotal=${recon.grandTotal.toFixed(2)}, driftHalalas=${recon.driftHalalas}, preflightValid=${audit.valid}`;
+    });
+
+    await step('14. Product Gap 2: Partial Credit Note (381) & Standalone Developer API (/api/v1/sign-and-submit)', async () => {
+      const pcnRes = await app.inject({
+        method: 'POST',
+        url: `/api/invoices/${b2cInvoiceId}/partial-credit-note`,
+        payload: {
+          refundAmount: 50.0,
+          returnReason: 'Partial return by customer'
+        }
+      });
+      assert.equal(pcnRes.statusCode, 200);
+      const pcnBody = JSON.parse(pcnRes.body);
+      assert.equal(pcnBody.success, true);
+      assert.ok(pcnBody.creditNote.invoiceUuid);
+
+      const pcnDb = await pool.query(`SELECT signed_xml, invoice_type FROM invoices WHERE id = $1`, [pcnBody.creditNote.invoiceId]);
+      assert.equal(pcnDb.rows[0].invoice_type, 'credit_note');
+      assert.ok(pcnDb.rows[0].signed_xml.includes('381'));
+      assert.ok(pcnDb.rows[0].signed_xml.includes('BillingReference'));
+
+      const extRes = await app.inject({
+        method: 'POST',
+        url: '/api/v1/sign-and-submit',
+        payload: {
+          merchantId,
+          branchId,
+          isB2C: true,
+          items: [
+            {
+              name: 'Laravel / PHP Custom API Item',
+              quantity: 2,
+              price: 150.0,
+              taxPercent: 15
+            }
+          ]
+        }
+      });
+      assert.equal(extRes.statusCode, 200);
+      const extBody = JSON.parse(extRes.body);
+      assert.equal(extBody.success, true);
+      assert.equal(extBody.status, 'reported');
+      assert.ok(extBody.invoiceUuid);
+      assert.ok(extBody.invoiceHash);
+      assert.ok(extBody.qrCodeBase64);
+
+      return `creditNoteIcv=${pcnBody.creditNote.icv}, extInvoiceUuid=${extBody.invoiceUuid.slice(0, 8)}..., extIcv=${extBody.icv}`;
+    });
+
+    await step('15. Product Gap 3: Automated AES-256-GCM Encrypted Backup & 7-Year Audit Verification', async () => {
+      const backupRes = await app.inject({
+        method: 'GET',
+        url: `/api/ops/backup?merchantId=${merchantId}`
+      });
+      assert.equal(backupRes.statusCode, 200);
+      const backupBody = JSON.parse(backupRes.body);
+      assert.equal(backupBody.success, true);
+      assert.ok(backupBody.checksumSha256);
+      assert.ok(backupBody.encryptedPayload.startsWith('v1:'));
+      assert.ok(backupBody.recordCounts.egsUnits >= 1);
+      assert.ok(backupBody.recordCounts.invoices >= 1);
+
+      const verifyRes = await app.inject({
+        method: 'POST',
+        url: '/api/ops/backup/verify',
+        payload: {
+          encryptedPayload: backupBody.encryptedPayload,
+          expectedChecksum: backupBody.checksumSha256
+        }
+      });
+      assert.equal(verifyRes.statusCode, 200);
+      const verifyBody = JSON.parse(verifyRes.body);
+      assert.equal(verifyBody.success, true);
+      assert.equal(verifyBody.valid, true);
+      assert.equal(verifyBody.checksumMatched, true);
+
+      return `invoicesBackedUp=${backupBody.recordCounts.invoices}, egsUnits=${backupBody.recordCounts.egsUnits}, checksumMatched=${verifyBody.checksumMatched}`;
+    });
+
     process.stdout.write('\n=== PSTACK POTETO-MODE VERIFICATION LEVER: ALL GATES GREEN ===\n');
     console.table(results);
   } finally {
@@ -409,6 +551,6 @@ async function runLever(): Promise<void> {
 }
 
 runLever().catch((err) => {
-  process.stderr.write(`Lever verification failed: ${err.message}\n`);
+  process.stderr.write(`Lever verification failed: ${err.stack || err.message}\n`);
   process.exit(1);
 });

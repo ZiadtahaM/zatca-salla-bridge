@@ -633,6 +633,7 @@ function renderPortalHtml(data: {
         </div>
       </div>
       <div class="merchant-meta">
+        <span class="badge badge-warning" style="background:#fffbeb; color:#b45309; border:1px solid #fde68a;">تجريبي (SANDBOX / DEMO) — فواتير غير ضريبية</span>
         ${m ? `<span class="badge badge-info"><span class="pulse-dot"></span> المتجر: ${escapeHtml(m)}</span>` : `<span class="badge badge-warning">لم يتم تحديد المتجر</span>`}
         <span class="badge badge-success">الاشتراك: ${escapeHtml(sub.status)}</span>
       </div>
@@ -673,7 +674,7 @@ function renderPortalHtml(data: {
     <!-- Interactive Live Demo Sandbox Banner -->
     <div class="demo-banner">
       <div class="demo-banner-content">
-        <span class="demo-pill">وضع التجربة الحية الفورية (Interactive Demo)</span>
+        <span class="demo-pill" style="background:#b45309;">تجريبي (SANDBOX / DEMO) — فواتير غير ضريبية لأغراض المحاكاة والتأهيل</span>
         <h3 style="font-size: 1.15rem; color: #004d40; font-weight: 700; margin: 4px 0 6px 0;">
           اختبر دورة الفوترة الزكوية الكاملة لمتاجر سلة بنقرة واحدة
         </h3>
@@ -792,7 +793,7 @@ function renderPortalHtml(data: {
                     <td><span class="badge badge-warning">${escapeHtml(Array.isArray(item.missing_fields) ? item.missing_fields.join(', ') : 'العنوان الوطني')}</span></td>
                     <td>${new Date(item.created_at).toLocaleString('ar-SA')}</td>
                     <td>
-                      <button class="btn btn-secondary btn-sm" onclick="openEnrichDialog('${item.order_id}')">
+                      <button class="btn btn-secondary btn-sm" onclick="openEnrichDialog('${item.order_id}', '${escapeHtml(item.buyer_name)}', '${escapeHtml(item.buyer_vat)}')">
                         استكمال وتوقيع
                       </button>
                     </td>
@@ -829,25 +830,37 @@ function renderPortalHtml(data: {
                 </tr>
               </thead>
               <tbody>
-                ${data.invoices.map(inv => `
+                ${data.invoices.map(inv => {
+                  let statusBadge = '<span class="badge badge-info">موقعة محلياً (Signed Locally - 60ms)</span>';
+                  if (inv.status === 'cleared') {
+                    statusBadge = '<span class="badge badge-success">تم الاعتماد في محاكاة زاتكا (Sandbox Cleared)</span>';
+                  } else if (inv.status === 'reported') {
+                    statusBadge = '<span class="badge badge-success">تم الإبلاغ في محاكاة زاتكا (Sandbox Reported)</span>';
+                  } else if (inv.invoice_type === 'tax_invoice' && inv.status !== 'cleared') {
+                    statusBadge = '<span class="badge badge-warning">مسودة بانتظار اعتماد فاتورة (Draft Awaiting Clearance)</span>';
+                  } else if (inv.status === 'rejected') {
+                    statusBadge = '<span class="badge badge-danger">مرفوضة (Rejected)</span>';
+                  }
+
+                  return `
                   <tr>
                     <td><code style="font-size: 0.8rem; background: var(--surface-sub); padding: 2px 6px; border-radius: 4px;">${inv.uuid.slice(0, 8)}...</code></td>
                     <td><code>${inv.order_id}</code></td>
                     <td>${inv.invoice_type === 'tax_invoice' ? '<span class="badge badge-info">ضريبية B2B</span>' : (inv.invoice_type === 'credit_note' ? '<span class="badge badge-warning">إشعار دائن 381</span>' : '<span class="badge badge-success">مبسطة B2C</span>')}</td>
                     <td><strong>${inv.grand_total} ${inv.currency}</strong></td>
-                    <td><span class="badge ${inv.status === 'cleared' || inv.status === 'reported' ? 'badge-success' : (inv.status === 'rejected' ? 'badge-danger' : 'badge-warning')}">${inv.status === 'cleared' ? 'معتمدة (Cleared)' : (inv.status === 'reported' ? 'مبلغة (Reported)' : inv.status)}</span></td>
+                    <td>${statusBadge}</td>
                     <td>${new Date(inv.issue_timestamp).toLocaleDateString('ar-SA')}</td>
                     <td>
                       <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
                         <button class="btn btn-secondary btn-sm" onclick="openInvoicePreview('${inv.id}', '${inv.uuid}', '${inv.order_id}', ${inv.icv || 1}, '${inv.grand_total}', '${inv.subtotal || (inv.grand_total / 1.15).toFixed(2)}', '${inv.tax_total || (inv.grand_total - (inv.grand_total / 1.15)).toFixed(2)}', '${inv.invoice_type}', '${inv.status}', '${new Date(inv.issue_timestamp).toLocaleDateString('ar-SA')}')">معاينة وسكان</button>
-                        <a href="/api/invoices/${inv.id}/pdf" target="_blank" class="btn btn-secondary btn-sm">PDF/A-3</a>
+                        <a href="/api/invoices/${inv.id}/pdf" target="_blank" class="btn btn-secondary btn-sm">تحميل PDF + XML</a>
                         <a href="/api/invoices/${inv.id}/printable" target="_blank" class="btn btn-secondary btn-sm">عرض A4</a>
                         <button class="btn btn-primary btn-sm" onclick="dispatchInvoice('${inv.id}')">إرسال للزكاة</button>
                         ${inv.invoice_type !== 'credit_note' ? `<button class="btn btn-warning btn-sm" onclick="openPartialCreditDialog('${inv.id}', '${inv.uuid}', ${inv.grand_total})">إشعار دائن (381)</button>` : ''}
                       </div>
                     </td>
                   </tr>
-                `).join('')}
+                `}).join('')}
               </tbody>
             </table>
           </div>
@@ -945,9 +958,9 @@ function renderPortalHtml(data: {
           </p>
         </div>
         <div class="card" style="margin-bottom: 0;">
-          <h3 style="font-size: 0.98rem; color: #004d40; font-weight: 700; margin-bottom: 8px;">حفظ وأرشفة معتمدة لـ 7 سنوات</h3>
+          <h3 style="font-size: 0.98rem; color: #004d40; font-weight: 700; margin-bottom: 8px;">سجل تدقيق متسلسل مشفر يكشف أي تعديل — حفظ 6+ سنوات</h3>
           <p style="font-size: 0.85rem; color: #475569; line-height: 1.6;">
-            سلسلة هاش غير قابلة للتلاعب (Cryptographic Hash Chaining) تربط كل فاتورة بسابقتها، مع توفير نسخ احتياطي مشفر وتقرير تدقيق سنوي جاهز للفاحص الضريبي.
+            سلسلة هاش متسلسلة كاشفة لأي تلاعب (Tamper-Evident Cryptographic Hash Chain) تربط كل فاتورة بسابقتها بدقة، مع أرشفة موثقة لمدة 6+ سنوات وفق المادة 66 من اللائحة التنفيذية لضريبة القيمة المضافة.
           </p>
         </div>
       </div>
@@ -956,37 +969,59 @@ function renderPortalHtml(data: {
 
   <!-- Modern Modal: Enrich B2B Address -->
   <div id="enrich-modal" class="modal-backdrop">
-    <div class="modal-box">
+    <div class="modal-box" style="max-width: 620px;">
       <div class="modal-header">
-        <h3>استكمال العنوان الوطني للشركة (B2B)</h3>
+        <h3>استكمال العنوان الوطني وبيانات المنشأة (B2B)</h3>
         <button type="button" onclick="closeEnrichDialog()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--text-muted);">&times;</button>
       </div>
       <form id="enrich-form" onsubmit="submitEnrich(event)">
         <div class="modal-body">
           <input type="hidden" id="enrich-order-id" name="orderId">
           <p style="font-size: 0.88rem; color: var(--text-muted); margin-bottom: 16px;">
-            تشترط هيئة الزكاة رقم المبنى المكون من 4 أرقام والرمز البريدي المكون من 5 أرقام لإصدار الفاتورة الضريبية.
+            تتطلب لوائح هيئة الزكاة والضريبة والجمارك (BR-KSA-09 / BR-KSA-63) اكتمال كافة مكونات العنوان الوطني للمشتري المحلي (اسم المنشأة، الرقم الضريبي 15 رقم أو السجل التجاري، اسم الشارع، رقم المبنى من 4 أرقام، الحي، المدينة، والرمز البريدي من 5 أرقام).
           </p>
-          <div class="form-group">
-            <label>رقم المبنى (4 أرقام):</label>
-            <input type="text" id="enrich-building" class="form-control" placeholder="مثال: 4321" maxlength="4" required>
+          <div class="grid-2" style="gap: 12px;">
+            <div class="form-group">
+              <label>اسم المنشأة / المشتري:</label>
+              <input type="text" id="enrich-company" class="form-control" placeholder="شركة الركائز المتحدة" required>
+            </div>
+            <div class="form-group">
+              <label>الرقم الضريبي للمشتري (15 رقم) أو السجل التجاري:</label>
+              <input type="text" id="enrich-vat" class="form-control" placeholder="310987654300003" required>
+            </div>
           </div>
-          <div class="form-group">
-            <label>الرمز البريدي (5 أرقام):</label>
-            <input type="text" id="enrich-postal" class="form-control" placeholder="مثال: 12244" maxlength="5" required>
+          <div class="grid-2" style="gap: 12px;">
+            <div class="form-group">
+              <label>المدينة:</label>
+              <input type="text" id="enrich-city" class="form-control" placeholder="الرياض" required>
+            </div>
+            <div class="form-group">
+              <label>اسم الحي / المنطقة:</label>
+              <input type="text" id="enrich-district" class="form-control" placeholder="العليا" required>
+            </div>
           </div>
           <div class="form-group">
             <label>اسم الشارع:</label>
-            <input type="text" id="enrich-street" class="form-control" placeholder="مثال: طريق الملك فهد" required>
+            <input type="text" id="enrich-street" class="form-control" placeholder="طريق الملك فهد" required>
+          </div>
+          <div class="grid-2" style="gap: 12px;">
+            <div class="form-group">
+              <label>رقم المبنى (4 أرقام إلزامي):</label>
+              <input type="text" id="enrich-building" class="form-control" placeholder="4321" maxlength="4" required>
+            </div>
+            <div class="form-group">
+              <label>الرمز البريدي (5 أرقام إلزامي):</label>
+              <input type="text" id="enrich-postal" class="form-control" placeholder="12244" maxlength="5" required>
+            </div>
           </div>
           <div class="form-group">
-            <label>اسم الحي / التقسيم:</label>
-            <input type="text" id="enrich-district" class="form-control" placeholder="مثال: العليا" required>
+            <label>الدولة:</label>
+            <input type="text" id="enrich-country" class="form-control" value="SA" readonly style="background:var(--surface-sub);">
           </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" onclick="closeEnrichDialog()">إلغاء</button>
-          <button type="submit" class="btn btn-primary">توقيع وختم الفاتورة فوراً</button>
+          <button type="submit" class="btn btn-primary">توقيع وختم الفاتورة الضريبية فوراً</button>
         </div>
       </form>
     </div>
@@ -1034,6 +1069,9 @@ function renderPortalHtml(data: {
         <button type="button" onclick="closeInvoiceModal()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--text-muted);">&times;</button>
       </div>
       <div class="modal-body" style="padding: 20px 24px;">
+        <div style="font-size: 0.8rem; color: #b45309; background: #fffbeb; border: 1px solid #fde68a; padding: 6px 12px; border-radius: 6px; margin-bottom: 14px; font-weight: 600;">
+          تجريبي (SANDBOX / DEMO) — فواتير غير ضريبية لأغراض المحاكاة والتأهيل
+        </div>
         <div style="display: grid; grid-template-columns: 1fr 180px; gap: 20px; align-items: start;">
           <div>
             <div style="margin-bottom: 14px;">
@@ -1062,7 +1100,7 @@ function renderPortalHtml(data: {
       </div>
       <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
         <div style="display: flex; gap: 8px;">
-          <a id="inv-modal-pdf-link" href="#" target="_blank" class="btn btn-secondary btn-sm">تحميل PDF/A-3</a>
+          <a id="inv-modal-pdf-link" href="#" target="_blank" class="btn btn-secondary btn-sm">فاتورة ضريبية قابلة للطباعة (PDF) + ملف XML المعتمد</a>
           <a id="inv-modal-print-link" href="#" target="_blank" class="btn btn-secondary btn-sm">عرض وطباعة A4</a>
         </div>
         <button type="button" class="btn btn-secondary" onclick="closeInvoiceModal()">إغلاق</button>
@@ -1143,6 +1181,37 @@ function renderPortalHtml(data: {
       document.getElementById('inv-modal-qr-img').src = '/api/invoices/' + id + '/qr';
       document.getElementById('inv-modal-pdf-link').href = '/api/invoices/' + id + '/pdf';
       document.getElementById('inv-modal-print-link').href = '/api/invoices/' + id + '/printable';
+
+      const typeBadge = document.getElementById('inv-modal-type-badge');
+      if (type === 'tax_invoice') {
+        typeBadge.textContent = 'فاتورة ضريبية B2B';
+        typeBadge.className = 'badge badge-info';
+      } else if (type === 'credit_note') {
+        typeBadge.textContent = 'إشعار دائن 381';
+        typeBadge.className = 'badge badge-warning';
+      } else {
+        typeBadge.textContent = 'فاتورة ضريبية مبسطة B2C';
+        typeBadge.className = 'badge badge-success';
+      }
+
+      const statusBadge = document.getElementById('inv-modal-status-badge');
+      if (status === 'cleared') {
+        statusBadge.textContent = 'تم الاعتماد في محاكاة زاتكا (Sandbox Cleared)';
+        statusBadge.className = 'badge badge-success';
+      } else if (status === 'reported') {
+        statusBadge.textContent = 'تم الإبلاغ في محاكاة زاتكا (Sandbox Reported)';
+        statusBadge.className = 'badge badge-success';
+      } else if (type === 'tax_invoice' && status !== 'cleared') {
+        statusBadge.textContent = 'مسودة بانتظار اعتماد فاتورة (Draft Awaiting Clearance)';
+        statusBadge.className = 'badge badge-warning';
+      } else if (status === 'rejected') {
+        statusBadge.textContent = 'مرفوضة (Rejected)';
+        statusBadge.className = 'badge badge-danger';
+      } else {
+        statusBadge.textContent = 'موقعة محلياً (Signed Locally - 60ms)';
+        statusBadge.className = 'badge badge-info';
+      }
+
       document.getElementById('invoice-preview-modal').classList.add('open');
     }
 
@@ -1217,12 +1286,16 @@ function renderPortalHtml(data: {
       }
     }
 
-    function openEnrichDialog(orderId) {
+    function openEnrichDialog(orderId, buyerName, buyerVat) {
       document.getElementById('enrich-order-id').value = orderId;
+      document.getElementById('enrich-company').value = buyerName || 'شركة الركائز المتحدة للمقاولات';
+      document.getElementById('enrich-vat').value = buyerVat || '310987654300003';
+      document.getElementById('enrich-city').value = 'الرياض';
+      document.getElementById('enrich-district').value = 'العليا';
+      document.getElementById('enrich-street').value = 'طريق الملك فهد';
       document.getElementById('enrich-building').value = '4321';
       document.getElementById('enrich-postal').value = '12244';
-      document.getElementById('enrich-street').value = 'طريق الملك فهد';
-      document.getElementById('enrich-district').value = 'العليا';
+      document.getElementById('enrich-country').value = 'SA';
       document.getElementById('enrich-modal').classList.add('open');
     }
 
@@ -1233,20 +1306,28 @@ function renderPortalHtml(data: {
     async function submitEnrich(e) {
       e.preventDefault();
       const orderId = document.getElementById('enrich-order-id').value;
+      const company = document.getElementById('enrich-company').value.trim();
+      const vat = document.getElementById('enrich-vat').value.trim();
+      const city = document.getElementById('enrich-city').value.trim();
+      const district = document.getElementById('enrich-district').value.trim();
+      const street = document.getElementById('enrich-street').value.trim();
       const bld = document.getElementById('enrich-building').value.trim();
       const postal = document.getElementById('enrich-postal').value.trim();
-      const street = document.getElementById('enrich-street').value.trim();
-      const district = document.getElementById('enrich-district').value.trim();
+      const country = document.getElementById('enrich-country').value.trim() || 'SA';
 
       try {
         const res = await fetch('/api/b2b/orders/' + orderId + '/enrich', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            company_name: company,
+            buyer_vat: vat,
+            city,
+            district,
+            street,
             building_number: bld,
             postal_code: postal,
-            street,
-            district
+            country
           })
         });
         const data = await res.json();

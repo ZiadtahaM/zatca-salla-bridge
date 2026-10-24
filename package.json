@@ -8,7 +8,8 @@
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "test": "tsx --test tests/*.test.ts",
-    "verify": "tsx tools/cli/verify-zatca-bridge.ts"
+    "verify": "tsx tools/cli/verify-zatca-bridge.ts",
+    "benchmark": "tsx tools/benchmark/concurrency-1000-runner.ts"
   },
   "dependencies": {
     "@types/qrcode": "^1.5.6",

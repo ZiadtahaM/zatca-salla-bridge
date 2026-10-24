@@ -36,6 +36,8 @@ function mapInvoiceRowToPdfInput(row: any): InvoicePdfInput {
       ? row.supply_date.toISOString().split('T')[0]
       : String(row.supply_date);
 
+  const isDraftWatermark = String(row.invoice_type) === 'tax_invoice' && String(row.status) !== 'cleared';
+
   return {
     invoiceId: String(row.id),
     uuid: String(row.uuid),
@@ -53,7 +55,9 @@ function mapInvoiceRowToPdfInput(row: any): InvoicePdfInput {
     qrCodeBase64: String(row.qr_code_payload),
     xmlContent,
     pih: String(row.pih),
-    invoiceHash: String(row.invoice_hash)
+    invoiceHash: String(row.invoice_hash),
+    status: String(row.status || ''),
+    isDraftWatermark
   };
 }
 
@@ -130,17 +134,24 @@ export async function invoicePdfRoutes(fastify: FastifyInstance): Promise<void> 
     }
 
     try {
+      const isDraftB2b = String(row.invoice_type) === 'tax_invoice' && String(row.status) !== 'cleared';
       const pngBuffer = await QRCode.toBuffer(row.qr_code_payload, {
         width: 320,
         margin: 1,
-        color: { dark: '#000000', light: '#ffffff' }
+        color: { dark: isDraftB2b ? '#b91c1c' : '#000000', light: isDraftB2b ? '#fff1f2' : '#ffffff' }
       });
 
-      return reply
+      reply
         .status(200)
         .header('Content-Type', 'image/png')
-        .header('Cache-Control', 'public, max-age=86400')
-        .send(pngBuffer);
+        .header('Cache-Control', isDraftB2b ? 'no-cache' : 'public, max-age=86400');
+
+      if (isDraftB2b) {
+        reply.header('X-Zatca-Status', 'DRAFT_AWAITING_CLEARANCE');
+        reply.header('X-Zatca-Warning', 'B2B Standard Tax Invoice is awaiting ZATCA clearance; QR code cannot legally be issued to buyer yet');
+      }
+
+      return reply.send(pngBuffer);
     } catch (err: any) {
       return reply.status(500).send({ error: 'QR_GENERATION_FAILED', message: err.message });
     }

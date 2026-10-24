@@ -26,10 +26,10 @@ export function formatZatcaUtcZTimestamp(date: Date): string {
   return `${yyyy}-${mm}-${dd}T${hh}:${min}:${ss}Z`;
 }
 
-export function isB2bCustomer(taxNumber?: string | null): boolean {
-  if (!taxNumber) return false;
-  const clean = taxNumber.trim();
-  return /^[3][0-9]{13}[3]$/.test(clean);
+export function isB2bCustomer(taxNumber?: string | null, crn?: string | null): boolean {
+  if (taxNumber && /^[3][0-9]{13}[3]$/.test(taxNumber.trim())) return true;
+  if (crn && /^\d{10}$/.test(crn.trim())) return true;
+  return false;
 }
 
 export interface B2bAddressValidation {
@@ -49,8 +49,11 @@ export function validateB2bBuyerAddress(order: SallaOrderData): B2bAddressValida
   const isDomestic = country === 'SA';
 
   const taxNum = order.customer.tax_number?.trim();
+  const crn = (order.customer as any)?.crn?.toString().trim();
   if (isDomestic) {
-    if (!taxNum || !/^[3][0-9]{13}[3]$/.test(taxNum)) {
+    const isValidVat = Boolean(taxNum && /^[3][0-9]{13}[3]$/.test(taxNum));
+    const isValidCrn = Boolean(crn && /^\d{10}$/.test(crn));
+    if (!isValidVat && !isValidCrn) {
       missingFields.push('buyer_tax_number_invalid');
     }
   } else {

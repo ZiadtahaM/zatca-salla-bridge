@@ -782,10 +782,21 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       return { rows: [], rowCount: inv ? 1 : 0 };
     }
 
-    if (normalized.includes('UPDATE invoices SET status = $1 WHERE id = $2')) {
-      const inv = invoices.find((i) => i.id === params[1]);
+    if (normalized.includes('UPDATE invoices SET') && (normalized.includes('WHERE id = $') || normalized.includes("WHERE id = '"))) {
+      const invId = params && params.length > 0 ? params[params.length - 1] : null;
+      const inv = invoices.find((i) => i.id === invId || (typeof normalized === 'string' && normalized.includes(i.id)));
       if (inv) {
-        inv.status = params[0];
+        if (normalized.includes('invoice_type = $1') && normalized.includes('status = $2')) {
+          inv.invoice_type = params[0];
+          inv.status = params[1];
+        } else if (normalized.includes("invoice_type = 'tax_invoice'")) {
+          inv.invoice_type = 'tax_invoice';
+          if (normalized.includes("status = 'signed'")) {
+            inv.status = 'signed';
+          }
+        } else if (params && params.length >= 1) {
+          inv.status = params[0];
+        }
         inv.updated_at = new Date();
       }
       return { rows: [], rowCount: inv ? 1 : 0 };

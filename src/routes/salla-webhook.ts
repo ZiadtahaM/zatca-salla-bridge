@@ -331,6 +331,8 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
       district?: string;
       city?: string;
       company_name?: string;
+      buyer_vat?: string;
+      country?: string;
     };
 
     const client = await pool.connect();
@@ -360,12 +362,14 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
         ...rawOrder,
         customer: {
           ...rawOrder.customer,
-          company_name: body.company_name !== undefined ? body.company_name : rawOrder.customer.company_name
+          company_name: body.company_name !== undefined ? body.company_name : rawOrder.customer.company_name,
+          tax_number: body.buyer_vat !== undefined ? body.buyer_vat : rawOrder.customer.tax_number
         },
         shipping: {
           ...(rawOrder.shipping || {}),
           address: {
             ...existingAddress,
+            country: body.country || existingAddress.country || 'SA',
             building_number: body.building_number !== undefined ? body.building_number : existingAddress.building_number,
             postal_code: body.postal_code !== undefined ? body.postal_code : existingAddress.postal_code,
             street: body.street !== undefined ? body.street : existingAddress.street,
@@ -393,9 +397,11 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
       await client.query(
         `UPDATE pending_b2b_orders
          SET status = 'enriched_and_signed',
+             buyer_vat = COALESCE($2, buyer_vat),
+             buyer_name = COALESCE($3, buyer_name),
              updated_at = NOW()
          WHERE id = $1`,
-        [pendingRow.id]
+        [pendingRow.id, body.buyer_vat || null, body.company_name || null]
       );
 
       return reply.status(200).send({

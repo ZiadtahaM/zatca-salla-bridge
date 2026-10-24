@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import { buildServer } from '../src/server.js';
 import { pool, initializeDatabaseSchema } from '../src/storage/db.js';
 import { attachStatefulRelationalTestDb, generateValidSecp256k1TestCert } from './helpers.js';
+import { encryptVaultSecret, decryptVaultSecret } from '../src/crypto/vault.js';
+import { validateB2bBuyerAddress, isB2bCustomer } from '../src/services/invoice-generator.js';
 import { join } from 'node:path';
+import { SallaOrderData } from '../src/types/salla.js';
 
-test('Human-Grade Portal Experience: Root redirect, Demo Seeding, Live 1-Click Invoice, and Visual QR', async (t) => {
+test('Human-Grade Portal Experience, Compliance Upgrades, and Security Audit', async (t) => {
   attachStatefulRelationalTestDb(pool);
   await initializeDatabaseSchema();
 
@@ -39,6 +42,13 @@ test('Human-Grade Portal Experience: Root redirect, Demo Seeding, Live 1-Click I
     assert.ok(html.includes('إصدار وتوثيق فاتورة تجريبية حية'));
     assert.ok(html.includes('ضمانات الامتثال والأمان الفني'));
     assert.ok(html.includes('خزنة تشفير بنكية (AES-256-GCM)'));
+
+    // Verify demo transparency watermark
+    assert.ok(html.includes('تجريبي (SANDBOX / DEMO) — فواتير غير ضريبية'));
+
+    // Verify status badges separation
+    assert.ok(html.includes('تم الاعتماد في محاكاة زاتكا (Sandbox Cleared)'));
+    assert.ok(html.includes('تم الإبلاغ في محاكاة زاتكا (Sandbox Reported)'));
   });
 
   let generatedInvoiceId = '';
@@ -81,5 +91,159 @@ test('Human-Grade Portal Experience: Root redirect, Demo Seeding, Live 1-Click I
     assert.equal(res.statusCode, 200);
     assert.ok(res.payload.includes('data:image/png;base64,'));
     assert.ok(res.payload.includes('فاتورة ضريبية مبسطة'));
+  });
+
+  await t.test('6. B2B Uncleared Invoice QR & PDF/HTML Draft Watermarking', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query(
+        `UPDATE invoices
+         SET invoice_type = 'tax_invoice', status = 'signed'
+         WHERE id = '${generatedInvoiceId}'`
+      );
+    } finally {
+      client.release();
+    }
+
+    const qrRes = await app.inject({
+      method: 'GET',
+      url: `/api/invoices/${generatedInvoiceId}/qr`
+    });
+    assert.equal(qrRes.statusCode, 200);
+    assert.equal(qrRes.headers['x-zatca-status'], 'DRAFT_AWAITING_CLEARANCE');
+    assert.ok(qrRes.headers['x-zatca-warning']?.includes('awaiting ZATCA clearance'));
+
+    const htmlRes = await app.inject({
+      method: 'GET',
+      url: `/api/invoices/${generatedInvoiceId}/printable`
+    });
+    assert.equal(htmlRes.statusCode, 200);
+    assert.ok(htmlRes.payload.includes('مسودة بانتظار اعتماد فاتورة'));
+    assert.ok(htmlRes.payload.includes('DRAFT - AWAITING ZATCA CLEARANCE'));
+    assert.ok(htmlRes.payload.includes('AWAITING'));
+
+    const pdfRes = await app.inject({
+      method: 'GET',
+      url: `/api/invoices/${generatedInvoiceId}/pdf`
+    });
+    assert.equal(pdfRes.statusCode, 200);
+    const pdfStr = pdfRes.rawPayload.toString('utf8');
+    assert.ok(pdfStr.includes('DRAFT - AWAITING ZATCA CLEARANCE'));
+  });
+
+  await t.test('7. B2B National Address Full 6-Component Validation (BR-KSA-09 / BR-KSA-63)', async () => {
+    const baseOrder: SallaOrderData = {
+      id: 887711,
+      date: { date: '2026-10-24 12:00:00', timezone: 'Asia/Riyadh' },
+      status: { id: 1, name: 'Under Review', slug: 'under_review' },
+      payment_method: 'credit_card',
+      currency: 'SAR',
+      amounts: {
+        sub_total: { amount: 500, currency: 'SAR' },
+        shipping_cost: { amount: 0, currency: 'SAR' },
+        tax: { amount: { amount: 75, currency: 'SAR' }, percent: 15 },
+        total: { amount: 575, currency: 'SAR' }
+      },
+      customer: {
+        id: 701,
+        first_name: 'سالم',
+        company_name: 'شركة الوفاق للخدمات',
+        tax_number: '310123456700003'
+      },
+      shipping: {
+        address: {
+          country: 'SA',
+          city: 'الرياض',
+          district: 'الملز',
+          street: 'شارع صلاح الدين',
+          building_number: '1234',
+          postal_code: '11564'
+        }
+      },
+      items: [
+        {
+          id: 1,
+          name: 'باقة استشارات B2B',
+          quantity: 1,
+          price: { amount: 500, currency: 'SAR' },
+          total: { amount: 500, currency: 'SAR' },
+          tax: { amount: { amount: 75, currency: 'SAR' }, percent: 15 }
+        }
+      ]
+    };
+
+    const validResult = validateB2bBuyerAddress(baseOrder);
+    assert.equal(validResult.isValid, true);
+    assert.equal(validResult.missingFields.length, 0);
+
+    const missingBuilding = JSON.parse(JSON.stringify(baseOrder));
+    delete missingBuilding.shipping.address.building_number;
+    const resBuilding = validateB2bBuyerAddress(missingBuilding);
+    assert.equal(resBuilding.isValid, false);
+    assert.ok(resBuilding.missingFields.includes('building_number_4_digits'));
+
+    const invalidBuilding = JSON.parse(JSON.stringify(baseOrder));
+    invalidBuilding.shipping.address.building_number = '123';
+    const resInvalidBuilding = validateB2bBuyerAddress(invalidBuilding);
+    assert.equal(resInvalidBuilding.isValid, false);
+    assert.ok(resInvalidBuilding.missingFields.includes('building_number_4_digits'));
+
+    const missingPostal = JSON.parse(JSON.stringify(baseOrder));
+    delete missingPostal.shipping.address.postal_code;
+    const resPostal = validateB2bBuyerAddress(missingPostal);
+    assert.equal(resPostal.isValid, false);
+    assert.ok(resPostal.missingFields.includes('postal_code_5_digits'));
+
+    const missingDistrict = JSON.parse(JSON.stringify(baseOrder));
+    delete missingDistrict.shipping.address.district;
+    const resDistrict = validateB2bBuyerAddress(missingDistrict);
+    assert.equal(resDistrict.isValid, false);
+    assert.ok(resDistrict.missingFields.includes('district_subdivision'));
+
+    assert.equal(isB2bCustomer('310123456700003'), true);
+    assert.equal(isB2bCustomer(null, '1010998877'), true);
+    assert.equal(isB2bCustomer('invalid_vat'), false);
+  });
+
+  await t.test('8. Trust Card Precision: Article 66 and Tamper-Evident Hash Chain', async () => {
+    const res = await app.inject({ method: 'GET', url: '/portal?merchantId=salla_demo_store' });
+    const html = res.payload;
+    assert.ok(html.includes('المادة 66'));
+    assert.ok(html.includes('حفظ 6+ سنوات'));
+    assert.ok(html.includes('Tamper-Evident'));
+  });
+
+  await t.test('9. Printable Tax Invoice PDF + XML Naming Precision', async () => {
+    const res = await app.inject({ method: 'GET', url: '/portal?merchantId=salla_demo_store' });
+    const html = res.payload;
+    assert.ok(html.includes('تحميل PDF + XML'));
+    assert.ok(html.includes('فاتورة ضريبية قابلة للطباعة (PDF) + ملف XML المعتمد'));
+  });
+
+  await t.test('10. AES-256-GCM Vault Security Audit & Key Non-Exposure', async () => {
+    const secret = 'ultra_confidential_zatca_secret_private_key_pem';
+    const encrypted1 = encryptVaultSecret(secret);
+    const encrypted2 = encryptVaultSecret(secret);
+
+    assert.notEqual(encrypted1, encrypted2);
+
+    const decrypted = decryptVaultSecret(encrypted1);
+    assert.equal(decrypted, secret);
+
+    const parts = encrypted1.split(':');
+    const tamperedCiphertext = parts[3].slice(0, -2) + 'ff';
+    const tamperedPayload = `v1:${parts[1]}:${parts[2]}:${tamperedCiphertext}`;
+    assert.throws(() => decryptVaultSecret(tamperedPayload));
+
+    const tamperedAuthTag = parts[2].slice(0, -2) + '00';
+    const tamperedTagPayload = `v1:${parts[1]}:${tamperedAuthTag}:${parts[3]}`;
+    assert.throws(() => decryptVaultSecret(tamperedTagPayload));
+
+    const exportRes = await app.inject({ method: 'GET', url: '/api/ops/backup?merchantId=salla_demo_store' });
+    assert.equal(exportRes.statusCode, 200);
+    const exportBody = JSON.parse(exportRes.payload);
+    assert.ok(exportBody.encryptedPayload);
+    assert.equal(typeof exportBody.encryptedPayload, 'string');
+    assert.ok(!exportRes.payload.includes(process.env.ENCRYPTION_MASTER_KEY || 'default_zatca_vault_master_key'));
   });
 });

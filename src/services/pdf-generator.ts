@@ -17,6 +17,8 @@ export interface InvoicePdfInput {
   pih: string;
   invoiceHash: string;
   qrDataUrl?: string;
+  status?: string;
+  isDraftWatermark?: boolean;
 }
 
 function escapePdfString(value: string): string {
@@ -57,8 +59,12 @@ export function generateZatcaPdfA3Buffer(input: InvoicePdfInput): Buffer {
   const titleLabel = resolveBilingualInvoiceTitle(input.invoiceType);
 
   const lines = [
-    `ZATCA Phase 2 Tax Invoice (PDF/A-3B)`,
+    `Bilingual Printable Tax Invoice (PDF) + Signed ZATCA XML`,
     `Document Type: ${input.invoiceType} (${titleLabel})`,
+    ...(input.isDraftWatermark ? [
+      `*** DRAFT - AWAITING ZATCA CLEARANCE (مسودة بانتظار اعتماد فاتورة) ***`,
+      `NOTICE: Standard B2B invoice is awaiting clearance and cannot be issued to buyer.`
+    ] : []),
     `Invoice ID: ${input.invoiceId}`,
     `Invoice UUID: ${input.uuid}`,
     `ICV: ${input.icv}`,
@@ -180,6 +186,7 @@ export function generateBilingualPrintableHtml(input: InvoicePdfInput): string {
   const titleBilingual = resolveBilingualInvoiceTitle(input.invoiceType);
   const xmlBase64 = Buffer.from(input.xmlContent, 'utf-8').toString('base64');
   const currency = input.currency || 'SAR';
+  const isDraft = Boolean(input.isDraftWatermark);
 
   return `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -219,6 +226,16 @@ export function generateBilingualPrintableHtml(input: InvoicePdfInput): string {
       border-bottom: 2px solid var(--accent);
       padding-bottom: 16px;
       margin-bottom: 24px;
+    }
+    .draft-banner {
+      background: #fef2f2;
+      border: 2px solid #ef4444;
+      color: #991b1b;
+      padding: 14px 18px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      text-align: center;
+      font-weight: 700;
     }
     .invoice-type-badge {
       display: inline-block;
@@ -297,6 +314,14 @@ export function generateBilingualPrintableHtml(input: InvoicePdfInput): string {
 </head>
 <body>
   <main class="invoice-container">
+    ${isDraft ? `
+    <div class="draft-banner">
+      <div style="font-size: 1.1rem; margin-bottom: 4px;">مسودة بانتظار اعتماد فاتورة من هيئة الزكاة (DRAFT - AWAITING ZATCA CLEARANCE)</div>
+      <div style="font-size: 0.85rem; font-weight: normal; color: #7f1d1d;">
+        وفق متطلبات المرحلة الثانية، لا يجوز تسليم فاتورة ضريبية B2B للمشتري قبل إتمام الاعتماد وتضمين الختم المشفر من منصة هيئة الزكاة والضريبة والجمارك.
+      </div>
+    </div>
+    ` : ''}
     <header class="header">
       <div>
         <div class="invoice-type-badge">${escapeHtml(titleBilingual)}</div>
@@ -304,7 +329,18 @@ export function generateBilingualPrintableHtml(input: InvoicePdfInput): string {
         <p>الرقم الضريبي للمورد / Seller VAT: <span class="ltr">${escapeHtml(input.sellerVat)}</span></p>
       </div>
       <div style="display: flex; gap: 16px; align-items: center;">
-        ${input.qrDataUrl ? `<img src="${input.qrDataUrl}" alt="ZATCA QR Code" style="width: 100px; height: 100px; border: 1px solid var(--border); border-radius: 6px; padding: 4px; background: white;" />` : ''}
+        ${input.qrDataUrl ? `
+        <div style="position: relative; display: inline-block;">
+          <img src="${input.qrDataUrl}" alt="ZATCA QR Code" style="width: 100px; height: 100px; border: 1px solid var(--border); border-radius: 6px; padding: 4px; background: white; ${isDraft ? 'filter: blur(1px) opacity(0.6);' : ''}" />
+          ${isDraft ? `
+          <div style="position: absolute; inset: 0; background: rgba(254, 242, 242, 0.9); border: 1.5px dashed #dc2626; border-radius: 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; font-weight: 800; color: #991b1b; font-size: 0.72rem; text-align: center; padding: 2px; line-height: 1.3;">
+            <span>مسودة</span>
+            <span>AWAITING</span>
+            <span>CLEARANCE</span>
+          </div>
+          ` : ''}
+        </div>
+        ` : ''}
         <div class="ltr">
           <div><strong>Order ID:</strong> ${escapeHtml(input.orderId)}</div>
           <div><strong>ICV:</strong> ${escapeHtml(String(input.icv))}</div>

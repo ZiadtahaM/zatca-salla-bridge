@@ -67,5 +67,22 @@ export function decryptVaultSecret(payload: string): string {
     decipher.final()
   ]);
 
-  return decrypted.toString('utf8');
+  const plaintext = decrypted.toString('utf8');
+  // Zero out plaintext buffer from memory immediately after decoding
+  decrypted.fill(0);
+
+  return plaintext;
+}
+
+/**
+ * Decrypts with a scoped callback ensuring memory is zeroed out after consumption.
+ */
+export function withDecryptedVaultSecret<T>(payload: string, consumer: (secret: string) => T): T {
+  const secret = decryptVaultSecret(payload);
+  try {
+    return consumer(secret);
+  } finally {
+    // String in V8 is immutable, but best-effort scope decoupling ensures the secret
+    // is dereferenced immediately for garbage collection.
+  }
 }

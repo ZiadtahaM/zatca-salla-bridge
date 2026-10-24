@@ -1,7 +1,7 @@
 import { Pool } from 'pg';
 
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/zatca_bridge',
+  connectionString: process.env.DATABASE_URL || 'postgres://zatca_admin:secret_zatca_password@localhost:5432/zatca_ledger',
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000

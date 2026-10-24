@@ -11,11 +11,13 @@
     "verify": "tsx tools/cli/verify-zatca-bridge.ts"
   },
   "dependencies": {
-    "fastify-raw-body": "^4.3.0",
+    "@types/qrcode": "^1.5.6",
     "@xmldom/xmldom": "^0.8.10",
     "dotenv": "^16.4.7",
     "fastify": "^4.28.1",
+    "fastify-raw-body": "^4.3.0",
     "pg": "^8.13.1",
+    "qrcode": "^1.5.4",
     "zod": "^3.24.1"
   },
   "devDependencies": {

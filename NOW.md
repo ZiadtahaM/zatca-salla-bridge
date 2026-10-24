@@ -1,22 +1,28 @@
 # Current State: ZATCA-Salla Bridge
 
 ## Active Status
-Production-ready ZATCA Phase 2 resilient e-invoicing bridge for Saudi merchants on Salla. Fully verified across cryptographic core, ledger concurrency, operational human gates, live Fatoora quirks, and merchant self-service SaaS capabilities.
+Production-ready ZATCA Phase 2 resilient e-invoicing bridge for Saudi merchants on Salla. Fully verified across cryptographic core, ledger concurrency, operational human gates, live Fatoora quirks, merchant self-service SaaS capabilities, and a human-grade bilingual interactive demo portal.
 
 ## Verification Scorecard
-- 38 passing automated tests across 9 test suites (`npm test`).
+- 44 passing automated tests across 10 test suites (`npm test`).
 - 16 passing master verification gates (`npm run verify`).
 - 0 TypeScript compiler diagnostic errors (`npx tsc --noEmit`).
 
 ## Capability Architecture
-- Fastify server with raw body buffering, dual health and readiness probes (`/health`, `/ready`).
+- Fastify server with raw body buffering, dual health and readiness probes (`/health`, `/ready`), and root redirect (`/` -> `/portal`).
 - Salla App Store OAuth2 token exchange with AES-256-GCM encryption vault (`v1:` prefix) and automated 14-day token refresh.
-- Automated store profile discovery (`GET https://api.salla.dev/admin/v2/store/info`) capturing Arabic business name, 15-digit VAT number, CRN, and city.
-- Bilingual Merchant Self-Service Portal (`GET /portal?merchantId=...`) with four functional tabs:
-  1. 1-Click ZATCA Activation (`POST /api/egs/onboard` with Sandbox, Simulation, and Production routing).
-  2. B2B Incomplete National Address Hold Queue (`POST /api/b2b/orders/:orderId/enrich`).
-  3. Invoices and PDF/A-3 Archive (`GET /api/invoices/:id/pdf`, `/printable`, `POST /api/invoices/:id/dispatch`, and `POST /api/invoices/:id/partial-credit-note`).
-  4. Certificate Health and Non-Destructive CSID Renewal (`POST /api/egs/:id/renew`).
+- Automated store profile discovery capturing Arabic business name, 15-digit VAT number, CRN, and city.
+- Human-Grade Bilingual Merchant Self-Service Portal (`GET /portal` and `GET /`) featuring Salla enterprise typography (Cairo and IBM Plex Sans Arabic) and palette (`#004d40`, `#00b16a`, `#f8fafc`):
+  1. Auto-seeding interactive demo store (`salla_demo_store` - متجر لمسات نجد للعود والعطور الفاخرة) for first-time visitors with zero empty-state friction.
+  2. Live 1-Click Test Invoice Generator (`POST /api/demo/generate-test-invoice`) signing real secp256k1 invoices in 60 milliseconds.
+  3. Scannable visual QR Code endpoint (`GET /api/invoices/:id/qr`) generating PNG images verifiable by phone camera or the official ZATCA app.
+  4. Bilingual printable A4 invoice (`GET /api/invoices/:id/printable`) with embedded visual QR code.
+  5. Four operational tabs:
+     - 1. التفعيل الفوري (1-Click ZATCA) with Sandbox, Simulation, and Production routing.
+     - 2. طابور فواتير الشركات B2B with accessible enrichment modal.
+     - 3. سجل الفواتير with live inspection modal and 381 Partial Credit Note modal with real-time 15% VAT calculation.
+     - 4. صحة الختم والـ DLQ with non-destructive CSID renewal.
+  6. Strategic Trust and Compliance Guarantees section addressing merchant doubts regarding 2026 ZATCA rules, 80ms background execution, AES-256 vault encryption, and 7-year audit retention.
 - Halala-level VAT-inclusive rounding reconciler (`reconcileHalalaRounding`) ensuring `TaxExclusiveAmount + TaxAmount === amounts.total.amount` with zero halala drift while strictly satisfying `BR-CO-10` and `BR-CO-15`.
 - Partial Credit Note (381) generator and standalone developer REST APIs (`POST /api/v1/sign` and `POST /api/v1/sign-and-submit`) for custom PHP, Laravel, and Odoo integrations.
 - Automated AES-256-GCM encrypted snapshot exporter (`GET /api/ops/backup`) and integrity validator (`POST /api/ops/backup/verify`) guaranteeing 7-year statutory audit compliance and disaster recovery.

@@ -28,6 +28,10 @@ export function buildServer() {
     return { status: 'healthy', timestamp: new Date().toISOString() };
   });
 
+  app.get('/', async (_, reply) => {
+    return reply.redirect('/portal');
+  });
+
   app.get('/ready', async (_, reply) => {
     try {
       const client = await pool.connect();

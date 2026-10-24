@@ -1,4 +1,5 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import QRCode from 'qrcode';
 import { pool } from '../storage/db.js';
 import {
   InvoicePdfInput,
@@ -103,11 +104,45 @@ export async function invoicePdfRoutes(fastify: FastifyInstance): Promise<void> 
     }
 
     const input = mapInvoiceRowToPdfInput(row);
+    try {
+      input.qrDataUrl = await QRCode.toDataURL(input.qrCodeBase64, {
+        width: 140,
+        margin: 1,
+        color: { dark: '#000000', light: '#ffffff' }
+      });
+    } catch {
+      // Graceful fallback if QR generation fails
+    }
     const html = generateBilingualPrintableHtml(input);
 
     return reply
       .status(200)
       .header('Content-Type', 'text/html; charset=utf-8')
       .send(html);
+  });
+
+  fastify.get('/api/invoices/:id/qr', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const row = await fetchInvoiceById(id);
+
+    if (!row || !row.qr_code_payload) {
+      return reply.status(404).send({ error: `Invoice QR not found: ${id}` });
+    }
+
+    try {
+      const pngBuffer = await QRCode.toBuffer(row.qr_code_payload, {
+        width: 320,
+        margin: 1,
+        color: { dark: '#000000', light: '#ffffff' }
+      });
+
+      return reply
+        .status(200)
+        .header('Content-Type', 'image/png')
+        .header('Cache-Control', 'public, max-age=86400')
+        .send(pngBuffer);
+    } catch (err: any) {
+      return reply.status(500).send({ error: 'QR_GENERATION_FAILED', message: err.message });
+    }
   });
 }

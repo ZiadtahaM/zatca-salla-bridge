@@ -16,6 +16,7 @@ export interface InvoicePdfInput {
   xmlContent: string;
   pih: string;
   invoiceHash: string;
+  qrDataUrl?: string;
 }
 
 function escapePdfString(value: string): string {
@@ -302,11 +303,14 @@ export function generateBilingualPrintableHtml(input: InvoicePdfInput): string {
         <h1>${escapeHtml(input.sellerNameArabic)}</h1>
         <p>الرقم الضريبي للمورد / Seller VAT: <span class="ltr">${escapeHtml(input.sellerVat)}</span></p>
       </div>
-      <div class="ltr">
-        <div><strong>Order ID:</strong> ${escapeHtml(input.orderId)}</div>
-        <div><strong>ICV:</strong> ${escapeHtml(String(input.icv))}</div>
-        <div><strong>Issue Timestamp:</strong> ${escapeHtml(input.issueTimestamp)}</div>
-        <div><strong>Supply Date:</strong> ${escapeHtml(input.supplyDate)}</div>
+      <div style="display: flex; gap: 16px; align-items: center;">
+        ${input.qrDataUrl ? `<img src="${input.qrDataUrl}" alt="ZATCA QR Code" style="width: 100px; height: 100px; border: 1px solid var(--border); border-radius: 6px; padding: 4px; background: white;" />` : ''}
+        <div class="ltr">
+          <div><strong>Order ID:</strong> ${escapeHtml(input.orderId)}</div>
+          <div><strong>ICV:</strong> ${escapeHtml(String(input.icv))}</div>
+          <div><strong>Issue Timestamp:</strong> ${escapeHtml(input.issueTimestamp)}</div>
+          <div><strong>Supply Date:</strong> ${escapeHtml(input.supplyDate)}</div>
+        </div>
       </div>
     </header>
 

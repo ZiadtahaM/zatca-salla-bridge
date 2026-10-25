@@ -1,7 +1,7 @@
 import { Pool } from 'pg';
 
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgres://zatca_admin:secret_zatca_password@localhost:5432/zatca_ledger',
+  connectionString: process.env.DATABASE_URL || 'postgres://zatca_admin:secret_zatca_password@127.0.0.1:5432/zatca_ledger',
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000
@@ -214,8 +214,60 @@ export async function initializeDatabaseSchema(): Promise<void> {
 
       CREATE INDEX IF NOT EXISTS idx_pending_b2b_order ON pending_b2b_orders(order_id);
       CREATE INDEX IF NOT EXISTS idx_pending_b2b_merchant ON pending_b2b_orders(merchant_id, status);
+
+      CREATE TABLE IF NOT EXISTS audit_logs (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          entity_type VARCHAR(64) NOT NULL,
+          entity_id VARCHAR(128) NOT NULL,
+          action VARCHAR(32) NOT NULL,
+          actor VARCHAR(128) NOT NULL,
+          payload JSONB,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs(entity_type, entity_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
+
+      CREATE OR REPLACE FUNCTION prevent_audit_log_tampering()
+      RETURNS TRIGGER AS $$
+      BEGIN
+          RAISE EXCEPTION 'TAMPER_EVIDENT_PROTECTION: UPDATE and DELETE operations are forbidden on audit_logs';
+      END;
+      $$ LANGUAGE plpgsql;
+
+      DO $$ BEGIN
+          IF NOT EXISTS (
+              SELECT 1 FROM pg_trigger WHERE tgname = 'trg_audit_logs_immutable'
+          ) THEN
+              CREATE TRIGGER trg_audit_logs_immutable
+              BEFORE UPDATE OR DELETE ON audit_logs
+              FOR EACH ROW
+              EXECUTE FUNCTION prevent_audit_log_tampering();
+          END IF;
+      EXCEPTION
+          WHEN duplicate_object THEN null;
+      END $$;
     `);
   } finally {
     client.release();
   }
+}
+
+export async function recordAuditLog(
+  client: any,
+  entry: {
+    entityType: string;
+    entityId: string;
+    action: string;
+    actor: string;
+    payload?: any;
+  }
+): Promise<string> {
+  const res = await client.query(
+    `INSERT INTO audit_logs (entity_type, entity_id, action, actor, payload)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id`,
+    [entry.entityType, entry.entityId, entry.action, entry.actor, entry.payload ? JSON.stringify(entry.payload) : null]
+  );
+  return res.rows[0].id;
 }

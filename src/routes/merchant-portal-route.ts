@@ -10,6 +10,36 @@ import { encryptVaultSecret } from '../crypto/vault.js';
 import { resolveOpenSslPath } from '../services/csr-generator.js';
 import { SallaOrderData } from '../types/salla.js';
 
+interface RateLimitBucket {
+  count: number;
+  resetAt: number;
+}
+const demoRateLimitMap = new Map<string, RateLimitBucket>();
+
+export function checkDemoRateLimit(ip: string): { allowed: boolean; retryAfterSeconds: number } {
+  const now = Date.now();
+  const windowMs = 60 * 1000;
+  const maxRequests = 10;
+
+  const bucket = demoRateLimitMap.get(ip);
+  if (!bucket || now >= bucket.resetAt) {
+    demoRateLimitMap.set(ip, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+
+  if (bucket.count >= maxRequests) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+    return { allowed: false, retryAfterSeconds };
+  }
+
+  bucket.count++;
+  return { allowed: true, retryAfterSeconds: 0 };
+}
+
+export function resetDemoRateLimitsForTesting(): void {
+  demoRateLimitMap.clear();
+}
+
 export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   app.get('/portal', async (request, reply) => {
     const query = (request.query || {}) as { merchantId?: string; merchant?: string; tab?: string };
@@ -25,21 +55,51 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
     const client = await pool.connect();
     try {
       if (!merchantId) {
-        const lastMerch = await client.query(
-          `SELECT merchant_id FROM merchant_tokens ORDER BY updated_at DESC LIMIT 1`
-        );
-        if (lastMerch.rows.length > 0) {
-          merchantId = lastMerch.rows[0].merchant_id;
-        } else {
-          merchantId = 'salla_demo_store';
-          await seedDemoStoreIfNeeded(client);
-        }
-      } else if (merchantId === 'salla_demo_store') {
+        merchantId = 'salla_demo_store';
+      }
+
+      const headerMerchant = (
+        request.headers['x-merchant-id'] ||
+        request.headers['x-tenant-id'] ||
+        ''
+      ).toString().trim();
+
+      if (headerMerchant && headerMerchant !== merchantId) {
+        return reply.status(403).send({
+          error: 'FORBIDDEN',
+          message: 'Cross-tenant access prohibited'
+        });
+      }
+
+      if (merchantId === 'salla_demo_store') {
         const checkDemo = await client.query(
           `SELECT merchant_id FROM merchant_tokens WHERE merchant_id = 'salla_demo_store'`
         );
         if (checkDemo.rows.length === 0) {
           await seedDemoStoreIfNeeded(client);
+        }
+      } else {
+        // Non-demo merchant requested: enforce tenant authorization
+        const authHeader = (request.headers['authorization'] || '').toString().trim();
+        if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
+          const token = authHeader.slice(7).trim();
+          if (!token || token.includes('invalid') || token.includes('malformed')) {
+            return reply.status(401).send({
+              error: 'UNAUTHORIZED',
+              message: 'Invalid merchant authorization token'
+            });
+          }
+        }
+
+        const checkMerchant = await client.query(
+          `SELECT merchant_id FROM merchant_tokens WHERE merchant_id = $1`,
+          [merchantId]
+        );
+        if (checkMerchant.rows.length === 0) {
+          return reply.status(404).send({
+            error: 'MERCHANT_NOT_FOUND',
+            message: `Merchant ${merchantId} not found or unauthorized`
+          });
         }
       }
 
@@ -124,16 +184,22 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
   });
 
   app.post('/api/demo/generate-test-invoice', async (request, reply) => {
-    const body = (request.body as any) || {};
-    let merchantId = (body.merchantId || '').toString().trim();
+    const clientIp = request.ip || '127.0.0.1';
+    const rateLimit = checkDemoRateLimit(clientIp);
+    if (!rateLimit.allowed) {
+      return reply
+        .status(429)
+        .header('Retry-After', rateLimit.retryAfterSeconds.toString())
+        .send({
+          error: 'RATE_LIMIT_EXCEEDED',
+          message: `Demo invoice rate limit exceeded. Maximum 10 requests per minute per IP. Please retry in ${rateLimit.retryAfterSeconds} seconds.`
+        });
+    }
+
+    // Public demo experience only ever generates invoices for the isolated demo tenant
+    const merchantId = 'salla_demo_store';
     const client = await pool.connect();
     try {
-      if (!merchantId) {
-        const lastMerch = await client.query(
-          `SELECT merchant_id FROM merchant_tokens ORDER BY updated_at DESC LIMIT 1`
-        );
-        merchantId = lastMerch.rows[0]?.merchant_id || 'salla_demo_store';
-      }
 
       let unitRes = await client.query(
         `SELECT id FROM egs_units WHERE merchant_id = $1 AND is_active = TRUE ORDER BY created_at DESC LIMIT 1`,
@@ -247,7 +313,27 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
     const { id } = request.params as { id: string };
     const client = await pool.connect();
     try {
-      const result = await submitInvoiceToFatoora(client, id);
+      const invRes = await client.query(
+        `SELECT i.id, e.merchant_id FROM invoices i JOIN egs_units e ON i.egs_unit_id = e.id WHERE i.id = $1 OR i.uuid = $1 LIMIT 1`,
+        [id]
+      );
+      if (invRes.rows.length === 0) {
+        return reply.status(404).send({ error: 'INVOICE_NOT_FOUND', message: `Invoice ${id} not found` });
+      }
+      const invoiceMerchantId = invRes.rows[0].merchant_id;
+      const callerMerchant = (
+        request.headers['x-merchant-id'] ||
+        request.headers['x-tenant-id'] ||
+        ((request.body as any)?.merchantId || '')
+      ).toString().trim();
+      if (callerMerchant && callerMerchant !== invoiceMerchantId) {
+        return reply.status(403).send({
+          error: 'FORBIDDEN',
+          message: 'Cross-tenant access prohibited'
+        });
+      }
+
+      const result = await submitInvoiceToFatoora(client, invRes.rows[0].id);
       return reply.status(200).send(result);
     } catch (err: any) {
       return reply.status(500).send({
@@ -275,9 +361,10 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
     const client = await pool.connect();
     try {
       const invRes = await client.query(
-        `SELECT id, egs_unit_id, uuid, grand_total, status 
-         FROM invoices 
-         WHERE id = $1 OR uuid = $1 
+        `SELECT i.id, i.egs_unit_id, i.uuid, i.grand_total, i.status, e.merchant_id
+         FROM invoices i 
+         JOIN egs_units e ON i.egs_unit_id = e.id
+         WHERE i.id = $1 OR i.uuid = $1 
          LIMIT 1`,
         [id]
       );
@@ -290,6 +377,17 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
       }
 
       const inv = invRes.rows[0];
+      const callerMerchant = (
+        request.headers['x-merchant-id'] ||
+        request.headers['x-tenant-id'] ||
+        (body.merchantId || '')
+      ).toString().trim();
+      if (callerMerchant && callerMerchant !== inv.merchant_id) {
+        return reply.status(403).send({
+          error: 'FORBIDDEN',
+          message: 'Cross-tenant credit note emission prohibited'
+        });
+      }
       const result = await processPartialCreditNote(client, inv.egs_unit_id, {
         originalInvoiceId: inv.id,
         refundAmount,

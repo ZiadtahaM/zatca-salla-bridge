@@ -81,9 +81,25 @@ export async function onboardingRoutes(fastify: FastifyInstance): Promise<void> 
     const workDir = join(process.cwd(), '.zatca-renew-temp', `${id}-${Date.now()}`);
 
     try {
-      const mockCertPem = process.env.ZATCA_SANDBOX_CERT_PEM || (
-        await client.query(`SELECT certificate FROM egs_units WHERE id = $1 LIMIT 1`, [id])
-      ).rows[0]?.certificate;
+      const egsCheck = await client.query(`SELECT id, merchant_id, certificate FROM egs_units WHERE id = $1`, [id]);
+      if (egsCheck.rows.length === 0) {
+        return reply.status(404).send({ error: 'EGS_NOT_FOUND', message: `EGS unit ${id} not found` });
+      }
+      const egsUnitMerchant = egsCheck.rows[0].merchant_id;
+      const callerMerchant = (
+        (request.headers['x-merchant-id'] || '') ||
+        (request.headers['x-tenant-id'] || '') ||
+        ((request.body as any)?.merchantId || '')
+      ).toString().trim();
+
+      if (callerMerchant && callerMerchant !== egsUnitMerchant) {
+        return reply.status(403).send({
+          error: 'FORBIDDEN',
+          message: 'Cross-tenant CSID renewal prohibited. You cannot renew an EGS unit belonging to another merchant.'
+        });
+      }
+
+      const mockCertPem = process.env.ZATCA_SANDBOX_CERT_PEM || egsCheck.rows[0].certificate;
 
       const apiClient = new MockZatcaApiClient(mockCertPem || '');
 

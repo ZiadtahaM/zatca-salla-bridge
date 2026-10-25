@@ -1,4 +1,4 @@
-import { createHash, createSign, X509Certificate } from 'node:crypto';
+import { createHash, createSign, X509Certificate, KeyObject } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { DOMParser, XMLSerializer } from '@xmldom/xmldom';
 
@@ -131,7 +131,7 @@ export function buildAndHashSignedProperties(params: {
 
 export interface SignParams {
   rawXml: string;
-  privateKeyPem: string;
+  privateKeyPem: string | Buffer | KeyObject;
   certPem: string;
   sellerNameArabic: string;
   sellerVatNumber: string;

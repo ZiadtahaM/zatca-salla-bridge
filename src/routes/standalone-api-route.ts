@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { pool } from '../storage/db.js';
-import { decryptVaultSecret } from '../crypto/vault.js';
+import { decryptVaultSecret, decryptVaultPrivateKey } from '../crypto/vault.js';
 import { signZatcaInvoiceExact } from '../crypto/zatca-signer.js';
 import { buildUblXmlFromSallaOrder } from '../services/invoice-generator.js';
 import { SallaOrderData } from '../types/salla.js';
@@ -144,10 +144,10 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
         isB2C
       });
 
-      const privateKeyPem = decryptVaultSecret(egs.private_key_pem);
+      const privateKey = decryptVaultPrivateKey(egs.private_key_pem);
       const signed = signZatcaInvoiceExact({
         rawXml,
-        privateKeyPem,
+        privateKeyPem: privateKey,
         certPem: egs.certificate,
         sellerNameArabic: 'شركة رواء للملابس الفاخرة',
         sellerVatNumber: egs.vat_number || '300075588700003',
@@ -284,10 +284,10 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
         isB2C
       });
 
-      const privateKeyPem = decryptVaultSecret(egs.private_key_pem);
+      const privateKey = decryptVaultPrivateKey(egs.private_key_pem);
       const signed = signZatcaInvoiceExact({
         rawXml,
-        privateKeyPem,
+        privateKeyPem: privateKey,
         certPem: egs.certificate,
         sellerNameArabic: 'شركة رواء للملابس الفاخرة',
         sellerVatNumber: egs.vat_number || '300075588700003',

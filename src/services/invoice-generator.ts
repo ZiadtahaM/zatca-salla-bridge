@@ -1,7 +1,7 @@
 import { PoolClient } from 'pg';
 import { SallaOrderData, SallaOrderItem } from '../types/salla.js';
 import { signZatcaInvoiceExact, SignOutput } from '../crypto/zatca-signer.js';
-import { decryptVaultSecret } from '../crypto/vault.js';
+import { decryptVaultSecret, decryptVaultPrivateKey } from '../crypto/vault.js';
 
 export interface GeneratedInvoiceResult {
   invoiceId: string;
@@ -809,11 +809,11 @@ export async function processSallaOrderIntoZatcaInvoice(
     const declaredTaxTotal = order.amounts.tax.amount.amount;
     const grandTotal = Number((taxExclusiveAmount + declaredTaxTotal).toFixed(2));
 
-    const privateKeyPem = decryptVaultSecret(egs.private_key_pem);
+    const privateKey = decryptVaultPrivateKey(egs.private_key_pem);
 
     const signed: SignOutput = signZatcaInvoiceExact({
       rawXml,
-      privateKeyPem,
+      privateKeyPem: privateKey,
       certPem: egs.certificate,
       sellerNameArabic: 'شركة رواء للملابس الفاخرة',
       sellerVatNumber: '300075588700003',
@@ -954,11 +954,11 @@ export async function processSallaRefundIntoZatcaCreditNote(
     const declaredTaxTotal = order.amounts.tax.amount.amount;
     const grandTotal = Number((taxExclusiveAmount + declaredTaxTotal).toFixed(2));
 
-    const privateKeyPem = decryptVaultSecret(egs.private_key_pem);
+    const privateKey = decryptVaultPrivateKey(egs.private_key_pem);
 
     const signed = signZatcaInvoiceExact({
       rawXml: rawCreditNoteXml,
-      privateKeyPem,
+      privateKeyPem: privateKey,
       certPem: egs.certificate,
       sellerNameArabic: 'شركة رواء للملابس الفاخرة',
       sellerVatNumber: '300075588700003',
@@ -1145,10 +1145,10 @@ export async function processPartialCreditNote(
       isB2C
     });
 
-    const privateKeyPem = decryptVaultSecret(egs.private_key_pem);
+    const privateKey = decryptVaultPrivateKey(egs.private_key_pem);
     const signed = signZatcaInvoiceExact({
       rawXml: rawCreditNoteXml,
-      privateKeyPem,
+      privateKeyPem: privateKey,
       certPem: egs.certificate,
       sellerNameArabic: 'شركة رواء للملابس الفاخرة',
       sellerVatNumber: '300075588700003',

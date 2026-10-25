@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes, createHash, createPrivateKey, KeyObject } from 'node:crypto';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH_BYTES = 12; // Standard GCM 96-bit nonce
@@ -17,8 +17,8 @@ function getMasterKey(): Buffer {
  * Encrypts sensitive secrets (private keys, CSID secrets, merchant OAuth tokens) using AES-256-GCM.
  * Output format: v1:iv_hex:auth_tag_hex:ciphertext_hex
  */
-export function encryptVaultSecret(plaintext: string): string {
-  if (!plaintext) {
+export function encryptVaultSecret(plaintext: string | Buffer): string {
+  if (!plaintext || (typeof plaintext === 'string' && plaintext.length === 0)) {
     throw new Error('Cannot encrypt empty plaintext');
   }
 
@@ -26,8 +26,9 @@ export function encryptVaultSecret(plaintext: string): string {
   const iv = randomBytes(IV_LENGTH_BYTES);
   const cipher = createCipheriv(ALGORITHM, key, iv);
 
+  const inputBuffer = typeof plaintext === 'string' ? Buffer.from(plaintext, 'utf8') : plaintext;
   const ciphertext = Buffer.concat([
-    cipher.update(Buffer.from(plaintext, 'utf8')),
+    cipher.update(inputBuffer),
     cipher.final()
   ]);
 
@@ -37,9 +38,10 @@ export function encryptVaultSecret(plaintext: string): string {
 }
 
 /**
- * Decrypts AES-256-GCM vault secrets and verifies authentication tag integrity.
+ * Decrypts AES-256-GCM vault secrets and returns the raw decrypted Buffer.
+ * Does NOT allocate an immutable JavaScript string, enabling memory wiping with .fill(0).
  */
-export function decryptVaultSecret(payload: string): string {
+export function decryptVaultSecretBuffer(payload: string): Buffer {
   if (!payload || !payload.startsWith('v1:')) {
     throw new Error('Invalid vault envelope: Expected v1 prefix');
   }
@@ -62,27 +64,54 @@ export function decryptVaultSecret(payload: string): string {
   const decipher = createDecipheriv(ALGORITHM, key, iv);
   decipher.setAuthTag(authTag);
 
-  const decrypted = Buffer.concat([
+  return Buffer.concat([
     decipher.update(ciphertext),
     decipher.final()
   ]);
-
-  const plaintext = decrypted.toString('utf8');
-  // Zero out plaintext buffer from memory immediately after decoding
-  decrypted.fill(0);
-
-  return plaintext;
 }
 
 /**
- * Decrypts with a scoped callback ensuring memory is zeroed out after consumption.
+ * Scoped callback decryption that guarantees the plaintext Buffer is zero-filled in a finally block.
+ */
+export function withDecryptedVaultSecretBuffer<T>(
+  payload: string,
+  consumer: (secretBuffer: Buffer) => T
+): T {
+  const buf = decryptVaultSecretBuffer(payload);
+  try {
+    return consumer(buf);
+  } finally {
+    buf.fill(0);
+  }
+}
+
+/**
+ * Decrypts a PEM-formatted private key directly into a native Node.js KeyObject.
+ * OpenSSL manages the key in native memory, and the intermediate plaintext Buffer
+ * is zeroed out immediately in a finally block without leaving an immutable string on the V8 heap.
+ */
+export function decryptVaultPrivateKey(payload: string): KeyObject {
+  return withDecryptedVaultSecretBuffer(payload, (buf) => {
+    return createPrivateKey({
+      key: buf,
+      format: 'pem'
+    });
+  });
+}
+
+/**
+ * Decrypts AES-256-GCM vault secrets to string for non-key metadata (OAuth tokens, JSON backups).
+ */
+export function decryptVaultSecret(payload: string): string {
+  return withDecryptedVaultSecretBuffer(payload, (buf) => {
+    return buf.toString('utf8');
+  });
+}
+
+/**
+ * Scoped string decryption callback.
  */
 export function withDecryptedVaultSecret<T>(payload: string, consumer: (secret: string) => T): T {
   const secret = decryptVaultSecret(payload);
-  try {
-    return consumer(secret);
-  } finally {
-    // String in V8 is immutable, but best-effort scope decoupling ensures the secret
-    // is dereferenced immediately for garbage collection.
-  }
+  return consumer(secret);
 }

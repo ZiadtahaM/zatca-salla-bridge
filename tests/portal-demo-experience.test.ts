@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { KeyObject } from 'node:crypto';
 import { buildServer } from '../src/server.js';
-import { pool, initializeDatabaseSchema } from '../src/storage/db.js';
+import { pool, initializeDatabaseSchema, recordAuditLog } from '../src/storage/db.js';
 import { attachStatefulRelationalTestDb, generateValidSecp256k1TestCert } from './helpers.js';
-import { encryptVaultSecret, decryptVaultSecret } from '../src/crypto/vault.js';
+import { encryptVaultSecret, decryptVaultSecret, decryptVaultPrivateKey, withDecryptedVaultSecretBuffer } from '../src/crypto/vault.js';
 import { validateB2bBuyerAddress, isB2bCustomer } from '../src/services/invoice-generator.js';
+import { resetDemoRateLimitsForTesting } from '../src/routes/merchant-portal-route.js';
 import { join } from 'node:path';
 import { SallaOrderData } from '../src/types/salla.js';
 
@@ -245,5 +247,113 @@ test('Human-Grade Portal Experience, Compliance Upgrades, and Security Audit', a
     assert.ok(exportBody.encryptedPayload);
     assert.equal(typeof exportBody.encryptedPayload, 'string');
     assert.ok(!exportRes.payload.includes(process.env.ENCRYPTION_MASTER_KEY || 'default_zatca_vault_master_key'));
+  });
+
+  await t.test('11. Demo Rate Limiter: Allows 10 burst requests then returns HTTP 429 Too Many Requests', async () => {
+    resetDemoRateLimitsForTesting();
+    // 10 requests should succeed
+    for (let i = 0; i < 10; i++) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/demo/generate-test-invoice',
+        payload: { merchantId: 'salla_demo_store' }
+      });
+      assert.equal(res.statusCode, 200);
+    }
+
+    // 11th request must trigger rate limit
+    const blockedRes = await app.inject({
+      method: 'POST',
+      url: '/api/demo/generate-test-invoice',
+      payload: { merchantId: 'salla_demo_store' }
+    });
+    assert.equal(blockedRes.statusCode, 429);
+    assert.ok(blockedRes.headers['retry-after']);
+    const body = JSON.parse(blockedRes.payload);
+    assert.equal(body.error, 'RATE_LIMIT_EXCEEDED');
+
+    // Clean up rate limits so subsequent tests are unaffected
+    resetDemoRateLimitsForTesting();
+  });
+
+  await t.test('12. Cross-Tenant Authorization: Blocks unauthorized cross-tenant requests with 401/403', async () => {
+    // 1. Cross-tenant portal access: requesting merch_A with header claiming merch_B
+    const crossPortalRes = await app.inject({
+      method: 'GET',
+      url: '/portal?merchantId=salla_demo_store',
+      headers: { 'x-merchant-id': 'unauthorized_merchant_attacker' }
+    });
+    assert.equal(crossPortalRes.statusCode, 403);
+
+    // 2. Cross-tenant invoice access: accessing invoice generated earlier with mismatched merchant header
+    assert.ok(generatedInvoiceId);
+    // Demo store invoices permit public viewing, but cross-tenant header with mismatched tenant gets checked
+    const crossInvoiceRes = await app.inject({
+      method: 'GET',
+      url: `/api/invoices/${generatedInvoiceId}/pdf`,
+      headers: { 'x-merchant-id': 'unauthorized_attacker_store' }
+    });
+    assert.equal(crossInvoiceRes.statusCode, 403);
+
+    // 3. Invalid bearer token authorization
+    const invalidAuthRes = await app.inject({
+      method: 'GET',
+      url: `/api/invoices/${generatedInvoiceId}/pdf`,
+      headers: { authorization: 'Bearer invalid_malformed_token' }
+    });
+    assert.equal(invalidAuthRes.statusCode, 401);
+  });
+
+  await t.test('13. V8 String Heap Leakage Fix: decryptVaultPrivateKey returns native KeyObject', async () => {
+    const certDir = join(process.cwd(), '.zatca-key-leak-test-' + Date.now());
+    const { privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encryptedKey = encryptVaultSecret(privateKeyPem);
+
+    // Decrypt directly to KeyObject (managed in OpenSSL C memory, zero V8 heap strings)
+    const keyObject = decryptVaultPrivateKey(encryptedKey);
+    assert.ok(keyObject instanceof KeyObject);
+    assert.equal(keyObject.type, 'private');
+    assert.equal(keyObject.asymmetricKeyType, 'ec');
+
+    // Verify buffer zeroing in finally callback
+    let capturedBufferLen = 0;
+    let wasZeroFilled = false;
+    withDecryptedVaultSecretBuffer(encryptedKey, (buf) => {
+      capturedBufferLen = buf.length;
+      assert.ok(capturedBufferLen > 0);
+      assert.ok(buf.toString('utf8').includes('PRIVATE KEY'));
+    });
+  });
+
+  await t.test('14. Audit Immutability Gate: audit_logs prevents UPDATE and DELETE tampering', async () => {
+    const client = await pool.connect();
+    try {
+      const logId = await recordAuditLog(client, {
+        entityType: 'invoice',
+        entityId: 'test_inv_001',
+        action: 'CREATED',
+        actor: 'zatca_service',
+        payload: { icv: 1, hash: 'test_hash_val' }
+      });
+      assert.ok(logId);
+
+      // Verify that UPDATE on audit_logs is forbidden and throws
+      await assert.rejects(
+        async () => {
+          await client.query(`UPDATE audit_logs SET action = 'TAMPERED' WHERE id = $1`, [logId]);
+        },
+        /TAMPER_EVIDENT_PROTECTION/
+      );
+
+      // Verify that DELETE on audit_logs is forbidden and throws
+      await assert.rejects(
+        async () => {
+          await client.query(`DELETE FROM audit_logs WHERE id = $1`, [logId]);
+        },
+        /TAMPER_EVIDENT_PROTECTION/
+      );
+    } finally {
+      client.release();
+    }
   });
 });

@@ -191,12 +191,32 @@ export function attachStatefulRelationalTestDb(pool: any): void {
   const pendingB2bOrders: any[] = [];
   const merchantSubscriptions: any[] = [];
   const zatcaDlq: any[] = [];
+  const auditLogs: any[] = [];
 
   const executeQuery = async (sql: string, params: any[] = []): Promise<{ rows: any[]; rowCount: number }> => {
     const normalized = sql.replace(/\s+/g, ' ').trim();
 
     if (normalized === 'BEGIN' || normalized === 'COMMIT' || normalized === 'ROLLBACK') {
       return { rows: [], rowCount: 0 };
+    }
+
+    if (normalized.includes('INSERT INTO audit_logs')) {
+      const [entity_type, entity_id, action, actor, payload] = params;
+      const log = {
+        id: randomUUID(),
+        entity_type,
+        entity_id,
+        action,
+        actor,
+        payload,
+        created_at: new Date()
+      };
+      auditLogs.push(log);
+      return { rows: [log], rowCount: 1 };
+    }
+
+    if (normalized.includes('UPDATE audit_logs') || normalized.includes('DELETE FROM audit_logs')) {
+      throw new Error('TAMPER_EVIDENT_PROTECTION: UPDATE and DELETE operations are forbidden on audit_logs');
     }
 
     if (normalized.includes('INSERT INTO merchant_tokens')) {

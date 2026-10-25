@@ -8,6 +8,6 @@ yarn-error.log*
 .zatca-e2e-csr*/
 .zatca-test-csr*/
 .zatca-onboard-temp*/
-
+.scratch/
 
 .zatca-*

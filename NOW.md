@@ -63,3 +63,19 @@ Execution across four load stages (100 runs @ concurrency 1, 200 runs @ concurre
 - Bilingual printable tax invoice generator with embedded `ZATCA_eInvoice.xml` (`/AFRelationship /Alternative`).
 - Outbound Fatoora Dispatcher for B2B clearance and B2C reporting with HTTP 409 duplicate recovery, DLQ backpressure retries, and Salla order history timeline write-backs.
 - Monotonic concurrency testing stepping levels (1, 5, 10, 20) against live PostgreSQL connection pools.
+
+## Real Human Browser Journey Verification (Playwright)
+Eight human merchant user flows were executed in headless Chromium using Playwright against the live Fastify server and PostgreSQL engine on port 3000.
+Visiting http://127.0.0.1:3000/ redirects to the merchant portal and issues an authenticated zatca_merchant_session HttpOnly cookie with SameSite Lax security.
+Tab 1 displays the cutover warning.
+The merchant checks the mandatory liability checkbox before proceeding.
+Clicking the live test generation button issues a signed invoice, whereupon the browser opens an interactive modal presenting the UUID, monotonic counter, monetary figures, and a scannable visual QR code image.
+Tab 3 lists historical records.
+Merchants download the quarterly accountant VAT return reconciliation CSV directly from this tab, and the downloaded file contains verified UTF-8 BOM encoding alongside Box 1 summary totals.
+Refunds work smoothly.
+The credit note dialog accepts pre-installation order references, splitting net amounts from fifteen percent tax values dynamically inside the browser DOM before final submission.
+Printable tax invoices render immediately.
+Navigating to /debugger serves the pre-flight testing interface.
+Support remains accessible through WhatsApp.
+Visual screenshot evidence and the downloaded CSV reconciliation file are recorded in the scratch directory.
+

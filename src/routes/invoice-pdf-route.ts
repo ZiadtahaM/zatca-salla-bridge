@@ -6,6 +6,7 @@ import {
   generateBilingualPrintableHtml,
   generateZatcaPdfA3Buffer
 } from '../services/pdf-generator.js';
+import { authenticateMerchantRequest } from '../crypto/auth-session.js';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -84,41 +85,14 @@ function checkInvoiceTenantAuth(
   request: FastifyRequest,
   invoiceMerchantId: string | null | undefined
 ): { allowed: boolean; status: number; error?: string } {
-  const query = (request.query || {}) as Record<string, any>;
-  const callerMerchant = (
-    (request.headers['x-merchant-id'] || '') ||
-    (request.headers['x-tenant-id'] || '') ||
-    (query.merchantId || '') ||
-    (query.merchant || '')
-  ).toString().trim();
-
-  // If a specific merchant was declared and does not match the invoice tenant: reject cross-tenant
-  if (callerMerchant && callerMerchant !== invoiceMerchantId) {
+  const auth = authenticateMerchantRequest(request, invoiceMerchantId || undefined);
+  if (!auth.authenticated) {
     return {
       allowed: false,
-      status: 403,
-      error: 'Cross-tenant access prohibited. You do not have permission to access invoices belonging to another merchant.'
+      status: auth.status,
+      error: auth.error
     };
   }
-
-  // Check Bearer authorization token if supplied
-  const authHeader = (request.headers['authorization'] || '').toString().trim();
-  if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
-    const token = authHeader.slice(7).trim();
-    if (!token || token.includes('invalid') || token.includes('malformed')) {
-      return {
-        allowed: false,
-        status: 401,
-        error: 'Unauthorized: Invalid merchant bearer token'
-      };
-    }
-  }
-
-  // Public demo invoices are accessible without credentials
-  if (invoiceMerchantId === 'salla_demo_store') {
-    return { allowed: true, status: 200 };
-  }
-
   return { allowed: true, status: 200 };
 }
 

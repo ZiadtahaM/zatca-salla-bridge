@@ -14,7 +14,8 @@ export const OnboardRequestSchema = z.object({
   vatNumber: z.string().regex(/^3\d{13}3$/, 'Saudi VAT number must be 15 digits starting and ending with 3'),
   otp: z.string().length(6, 'Fatoora OTP must be exactly 6 digits'),
   isProduction: z.boolean().optional().default(false),
-  environment: z.enum(['sandbox', 'simulation', 'production']).optional()
+  environment: z.enum(['sandbox', 'simulation', 'production']).optional(),
+  liabilityAccepted: z.boolean().optional()
 });
 
 export const RenewRequestSchema = z.object({
@@ -29,6 +30,13 @@ export async function onboardingRoutes(fastify: FastifyInstance): Promise<void> 
       return reply.status(400).send({
         error: 'Validation failed for onboarding request',
         details: parseResult.error.errors
+      });
+    }
+
+    if (parseResult.data.isProduction && !parseResult.data.liabilityAccepted) {
+      return reply.status(400).send({
+        error: 'LIABILITY_ACCEPTANCE_REQUIRED',
+        message: 'You must review and accept the ZATCA Cutover Guidelines and Platform Liability Terms before enabling production invoicing.'
       });
     }
 

@@ -9,6 +9,7 @@ import { processPartialCreditNote, processSallaOrderIntoZatcaInvoice } from '../
 import { encryptVaultSecret } from '../crypto/vault.js';
 import { resolveOpenSslPath } from '../services/csr-generator.js';
 import { SallaOrderData } from '../types/salla.js';
+import { authenticateMerchantRequest, setMerchantSessionCookie } from '../crypto/auth-session.js';
 
 interface RateLimitBucket {
   count: number;
@@ -52,25 +53,22 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
     let invoices: any[] = [];
     let dlqItems: any[] = [];
 
+    if (!merchantId) {
+      merchantId = 'salla_demo_store';
+    }
+
+    const auth = authenticateMerchantRequest(request, merchantId);
+    if (!auth.authenticated) {
+      return reply.status(auth.status).send({
+        error: auth.status === 403 ? 'FORBIDDEN' : 'UNAUTHORIZED',
+        message: auth.error
+      });
+    }
+
+    setMerchantSessionCookie(reply, merchantId);
+
     const client = await pool.connect();
     try {
-      if (!merchantId) {
-        merchantId = 'salla_demo_store';
-      }
-
-      const headerMerchant = (
-        request.headers['x-merchant-id'] ||
-        request.headers['x-tenant-id'] ||
-        ''
-      ).toString().trim();
-
-      if (headerMerchant && headerMerchant !== merchantId) {
-        return reply.status(403).send({
-          error: 'FORBIDDEN',
-          message: 'Cross-tenant access prohibited'
-        });
-      }
-
       if (merchantId === 'salla_demo_store') {
         const checkDemo = await client.query(
           `SELECT merchant_id FROM merchant_tokens WHERE merchant_id = 'salla_demo_store'`
@@ -79,18 +77,6 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
           await seedDemoStoreIfNeeded(client);
         }
       } else {
-        // Non-demo merchant requested: enforce tenant authorization
-        const authHeader = (request.headers['authorization'] || '').toString().trim();
-        if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
-          const token = authHeader.slice(7).trim();
-          if (!token || token.includes('invalid') || token.includes('malformed')) {
-            return reply.status(401).send({
-              error: 'UNAUTHORIZED',
-              message: 'Invalid merchant authorization token'
-            });
-          }
-        }
-
         const checkMerchant = await client.query(
           `SELECT merchant_id FROM merchant_tokens WHERE merchant_id = $1`,
           [merchantId]
@@ -321,15 +307,11 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
         return reply.status(404).send({ error: 'INVOICE_NOT_FOUND', message: `Invoice ${id} not found` });
       }
       const invoiceMerchantId = invRes.rows[0].merchant_id;
-      const callerMerchant = (
-        request.headers['x-merchant-id'] ||
-        request.headers['x-tenant-id'] ||
-        ((request.body as any)?.merchantId || '')
-      ).toString().trim();
-      if (callerMerchant && callerMerchant !== invoiceMerchantId) {
-        return reply.status(403).send({
-          error: 'FORBIDDEN',
-          message: 'Cross-tenant access prohibited'
+      const auth = authenticateMerchantRequest(request, invoiceMerchantId);
+      if (!auth.authenticated) {
+        return reply.status(auth.status).send({
+          error: auth.status === 403 ? 'FORBIDDEN' : 'UNAUTHORIZED',
+          message: auth.error
         });
       }
 
@@ -360,36 +342,63 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
 
     const client = await pool.connect();
     try {
-      const invRes = await client.query(
-        `SELECT i.id, i.egs_unit_id, i.uuid, i.grand_total, i.status, e.merchant_id
-         FROM invoices i 
-         JOIN egs_units e ON i.egs_unit_id = e.id
-         WHERE i.id = $1 OR i.uuid = $1 
-         LIMIT 1`,
-        [id]
-      );
+      let egsUnitId = body.egsUnitId;
+      let invoiceMerchantId = body.merchantId;
+      let origInvoiceId: string | undefined = undefined;
 
-      if (invRes.rows.length === 0) {
-        return reply.status(404).send({
-          error: 'INVOICE_NOT_FOUND',
-          message: `Invoice ${id} not found`
+      if (id !== 'historical' && id !== 'external') {
+        const invRes = await client.query(
+          `SELECT i.id, i.egs_unit_id, i.uuid, i.grand_total, i.status, e.merchant_id
+           FROM invoices i 
+           JOIN egs_units e ON i.egs_unit_id = e.id
+           WHERE i.id = $1 OR i.uuid = $1 
+           LIMIT 1`,
+          [id]
+        );
+
+        if (invRes.rows.length > 0) {
+          const inv = invRes.rows[0];
+          egsUnitId = inv.egs_unit_id;
+          invoiceMerchantId = inv.merchant_id;
+          origInvoiceId = inv.id;
+        } else if (!body.externalOriginalInvoiceNumber) {
+          return reply.status(404).send({
+            error: 'INVOICE_NOT_FOUND',
+            message: `Invoice ${id} not found`
+          });
+        }
+      }
+
+      if (!egsUnitId) {
+        const merchant = invoiceMerchantId || body.merchantId || 'salla_demo_store';
+        const egsRes = await client.query(
+          `SELECT id, merchant_id FROM egs_units WHERE merchant_id = $1 AND is_active = TRUE ORDER BY created_at DESC LIMIT 1`,
+          [merchant]
+        );
+        if (egsRes.rows.length === 0) {
+          return reply.status(400).send({
+            error: 'NO_ACTIVE_EGS',
+            message: `No active EGS unit found for merchant ${merchant}`
+          });
+        }
+        egsUnitId = egsRes.rows[0].id;
+        invoiceMerchantId = egsRes.rows[0].merchant_id;
+      }
+
+      const auth = authenticateMerchantRequest(request, invoiceMerchantId);
+      if (!auth.authenticated) {
+        return reply.status(auth.status).send({
+          error: auth.status === 403 ? 'FORBIDDEN' : 'UNAUTHORIZED',
+          message: auth.error
         });
       }
 
-      const inv = invRes.rows[0];
-      const callerMerchant = (
-        request.headers['x-merchant-id'] ||
-        request.headers['x-tenant-id'] ||
-        (body.merchantId || '')
-      ).toString().trim();
-      if (callerMerchant && callerMerchant !== inv.merchant_id) {
-        return reply.status(403).send({
-          error: 'FORBIDDEN',
-          message: 'Cross-tenant credit note emission prohibited'
-        });
-      }
-      const result = await processPartialCreditNote(client, inv.egs_unit_id, {
-        originalInvoiceId: inv.id,
+      const result = await processPartialCreditNote(client, egsUnitId, {
+        originalInvoiceId: origInvoiceId,
+        externalOriginalInvoiceNumber: body.externalOriginalInvoiceNumber,
+        externalOriginalInvoiceDate: body.externalOriginalInvoiceDate,
+        externalOriginalUuid: body.externalOriginalUuid,
+        isB2C: body.isB2C !== false,
         refundAmount,
         returnReason,
         items: body.items
@@ -806,6 +815,10 @@ function renderPortalHtml(data: {
       <div class="grid-2">
         <div class="card">
           <h2 class="card-title">بيانات الربط مع هيئة الزكاة والضريبة والجمارك</h2>
+          <div class="alert alert-warning" style="margin-bottom: 16px; border-right: 4px solid #f59e0b; background: rgba(245, 158, 11, 0.08); padding: 12px 14px; border-radius: 6px; font-size: 0.84rem; line-height: 1.6;">
+            <strong style="color: #b45309; display: block; margin-bottom: 4px;">تنبيه خطة التحول والانتقال (Cutover Warning):</strong>
+            يجب تعطيل أي ربط ZATCA مسبق مفعّل مباشرة في إعدادات متجر سلة أو عبر برامج محاسبية أخرى قبل إطلاق بيئة الإنتاج لتفادي ازدواجية إرسال الفواتير واحتساب الضريبة مرتين (30% Double-VAT).
+          </div>
           <div id="activation-alert" style="display: none;"></div>
           <form id="onboard-form" onsubmit="handleOnboard(event)">
             <input type="hidden" name="merchantId" value="${escapeHtml(m || 'salla_merch_01')}">
@@ -833,6 +846,15 @@ function renderPortalHtml(data: {
             <div class="form-group">
               <label>معرف الفرع أو نقطة البيع (Branch Identifier):</label>
               <input type="text" name="branchId" class="form-control" value="riyadh_hq" required>
+            </div>
+            <div class="form-group" style="margin-top: 14px; padding: 10px; background: var(--surface-sub); border-radius: 6px;">
+              <label style="display: flex; align-items: flex-start; gap: 8px; font-size: 0.82rem; cursor: pointer;">
+                <input type="checkbox" name="liabilityAccepted" id="liabilityAccepted" required style="margin-top: 3px;">
+                <span>
+                  <strong>إقرار وموافقة على شروط إخلاء المسؤولية القانونية:</strong>
+                  أقر بمسؤولية المنشأة التامة عن صحة البيانات والامتثال لأحكام اللائحة التنفيذية لضريبة القيمة المضافة. تقتصر مسؤولية نظام الربط البرمجي على تقديم الخدمة التقنية وتخضع لحد أقصى يعادل قيمة اشتراك شهر واحد.
+                </span>
+              </label>
             </div>
             <button type="submit" class="btn btn-primary" style="width: 100%;">
               ربط واعتماد الختم الرقمي فوراً مع ZATCA
@@ -912,7 +934,17 @@ function renderPortalHtml(data: {
     <!-- Tab 3: Invoices -->
     <div id="tab-invoices" class="tab-content ${data.activeTab === 'invoices' ? 'active' : ''}">
       <div class="card">
-        <h2 class="card-title">سجل الفواتير المصدرة</h2>
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+          <h2 class="card-title" style="margin-bottom: 0;">سجل الفواتير المصدرة</h2>
+          <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+            <a href="/api/invoices/export.csv?merchantId=${escapeHtml(m || 'salla_demo_store')}" download class="btn btn-secondary btn-sm" style="background: #059669; color: white; border-color: #047857; font-weight: 600;">
+              تصدير الإقرار الضريبي لبرنامج المحاسب (Excel / CSV معتمد)
+            </a>
+            <button type="button" class="btn btn-warning btn-sm" onclick="openHistoricalCreditDialog()">
+              إصدار إشعار دائن لطلب سابق (قبل تركيب الربط)
+            </button>
+          </div>
+        </div>
         ${data.invoices.length > 0 ? `
           <div style="overflow-x: auto;">
             <table>
@@ -1150,6 +1182,16 @@ function renderPortalHtml(data: {
             <label>سبب الاسترجاع (للتوثيق النظامي لدى هيئة الزكاة):</label>
             <input type="text" id="credit-reason" class="form-control" value="استرجاع صنف معيب أو جزئي بناءً على طلب العميل" required>
           </div>
+          <div id="credit-external-fields" style="display: none; border-top: 1px dashed var(--border); padding-top: 12px; margin-top: 12px;">
+            <div class="form-group">
+              <label>رقم الفاتورة أو الطلب السابق في متجر سلة:</label>
+              <input type="text" id="credit-external-num" class="form-control" placeholder="ORD-2024-9988">
+            </div>
+            <div class="form-group">
+              <label>تاريخ الفاتورة السابقة (YYYY-MM-DD):</label>
+              <input type="date" id="credit-external-date" class="form-control">
+            </div>
+          </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" onclick="closeCreditDialog()">إلغاء</button>
@@ -1329,7 +1371,8 @@ function renderPortalHtml(data: {
         vatNumber: formData.get('vatNumber'),
         otp: formData.get('otp'),
         environment: formData.get('environment'),
-        isProduction: formData.get('environment') === 'production'
+        isProduction: formData.get('environment') === 'production',
+        liabilityAccepted: formData.get('liabilityAccepted') === 'on' || formData.get('liabilityAccepted') === 'true'
       };
 
       const alertBox = document.getElementById('activation-alert');
@@ -1441,12 +1484,29 @@ function renderPortalHtml(data: {
       }
     }
 
+    function openHistoricalCreditDialog() {
+      document.getElementById('credit-inv-id').value = 'historical';
+      document.getElementById('credit-max-total').value = '999999';
+      document.getElementById('credit-amount').value = '100.00';
+      document.getElementById('credit-amount').removeAttribute('max');
+      document.getElementById('credit-external-fields').style.display = 'block';
+      const numInput = document.getElementById('credit-external-num');
+      if (numInput) numInput.required = true;
+      const dateInput = document.getElementById('credit-external-date');
+      if (dateInput) dateInput.value = new Date().toISOString().split('T')[0];
+      updateCreditMath('100.00');
+      document.getElementById('credit-modal').classList.add('open');
+    }
+
     function openPartialCreditDialog(invId, invUuid, grandTotal) {
       document.getElementById('credit-inv-id').value = invId;
       document.getElementById('credit-max-total').value = grandTotal;
       const defaultAmount = (grandTotal / 2).toFixed(2);
       document.getElementById('credit-amount').value = defaultAmount;
       document.getElementById('credit-amount').max = grandTotal;
+      document.getElementById('credit-external-fields').style.display = 'none';
+      const numInput = document.getElementById('credit-external-num');
+      if (numInput) numInput.required = false;
       updateCreditMath(defaultAmount);
       document.getElementById('credit-modal').classList.add('open');
     }
@@ -1474,12 +1534,24 @@ function renderPortalHtml(data: {
       const invId = document.getElementById('credit-inv-id').value;
       const refundAmount = parseFloat(document.getElementById('credit-amount').value);
       const returnReason = document.getElementById('credit-reason').value.trim();
+      const payload = {
+        refundAmount,
+        returnReason,
+        merchantId: '${escapeHtml(m || 'salla_demo_store')}'
+      };
+
+      if (invId === 'historical') {
+        const numInput = document.getElementById('credit-external-num');
+        const dateInput = document.getElementById('credit-external-date');
+        payload.externalOriginalInvoiceNumber = numInput ? numInput.value.trim() : 'HISTORICAL-ORD';
+        payload.externalOriginalInvoiceDate = dateInput ? dateInput.value.trim() : new Date().toISOString().split('T')[0];
+      }
 
       try {
         const res = await fetch('/api/invoices/' + invId + '/partial-credit-note', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refundAmount, returnReason })
+          body: JSON.stringify(payload)
         });
         const data = await res.json();
         if (res.ok) {
@@ -1512,6 +1584,9 @@ function renderPortalHtml(data: {
       }
     }
   </script>
+  <a href="https://wa.me/966500000000?text=${encodeURIComponent('السلام عليكم، استفسار بخصوص تفعيل نظام الربط مع هيئة الزكاة والضريبة والجمارك')}" target="_blank" rel="noopener noreferrer" style="position: fixed; bottom: 20px; left: 20px; background: #25d366; color: white; border-radius: 50px; padding: 10px 18px; font-weight: 700; text-decoration: none; box-shadow: 0 4px 14px rgba(0,0,0,0.25); display: flex; align-items: center; gap: 8px; z-index: 9999; font-size: 0.88rem;">
+    <span>الدعم الفني المباشر (واتساب)</span>
+  </a>
 </body>
 </html>`;
 }

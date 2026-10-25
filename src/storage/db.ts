@@ -68,7 +68,7 @@ export async function initializeDatabaseSchema(): Promise<void> {
           private_key_pem TEXT NOT NULL,
           csid_secret TEXT NOT NULL,
           current_icv BIGINT NOT NULL DEFAULT 0,
-          last_document_hash VARCHAR(64) NOT NULL,
+          last_document_hash VARCHAR(128) NOT NULL,
           expires_at TIMESTAMPTZ NOT NULL,
           renewal_status VARCHAR(32) NOT NULL DEFAULT 'active',
           last_renewal_alert_at TIMESTAMPTZ,
@@ -85,6 +85,7 @@ export async function initializeDatabaseSchema(): Promise<void> {
       ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS csid_secret TEXT;
       ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS renewal_status VARCHAR(32) NOT NULL DEFAULT 'active';
       ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS last_renewal_alert_at TIMESTAMPTZ;
+      ALTER TABLE egs_units ALTER COLUMN last_document_hash TYPE VARCHAR(128);
 
       CREATE INDEX IF NOT EXISTS idx_egs_units_merchant ON egs_units(merchant_id);
       CREATE INDEX IF NOT EXISTS idx_egs_units_merchant_salla_branch ON egs_units(merchant_id, salla_branch_id);
@@ -98,8 +99,8 @@ export async function initializeDatabaseSchema(): Promise<void> {
           invoice_type invoice_type_enum NOT NULL,
           uuid UUID NOT NULL UNIQUE,
           icv BIGINT NOT NULL,
-          pih VARCHAR(64) NOT NULL,
-          invoice_hash VARCHAR(64) NOT NULL,
+          pih VARCHAR(128) NOT NULL,
+          invoice_hash VARCHAR(128) NOT NULL,
           qr_code_payload TEXT NOT NULL,
           signed_xml TEXT NOT NULL,
           cleared_xml TEXT,
@@ -121,6 +122,8 @@ export async function initializeDatabaseSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_invoices_order ON invoices(order_id);
       CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status);
       CREATE INDEX IF NOT EXISTS idx_invoices_egs_created ON invoices(egs_unit_id, created_at DESC);
+      ALTER TABLE invoices ALTER COLUMN pih TYPE VARCHAR(128);
+      ALTER TABLE invoices ALTER COLUMN invoice_hash TYPE VARCHAR(128);
 
       CREATE TABLE IF NOT EXISTS zatca_submissions (
           id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

@@ -1026,7 +1026,11 @@ export async function processSallaRefundIntoZatcaCreditNote(
 }
 
 export interface ProcessPartialCreditNoteOptions {
-  originalInvoiceId: string;
+  originalInvoiceId?: string;
+  externalOriginalInvoiceNumber?: string;
+  externalOriginalInvoiceDate?: string;
+  externalOriginalUuid?: string;
+  isB2C?: boolean;
   refundAmount: number;
   returnReason?: string;
   items?: Array<{ name: string; quantity: number; price: number }>;
@@ -1048,19 +1052,41 @@ export async function processPartialCreditNote(
   await client.query('BEGIN');
 
   try {
-    const origRes = await client.query(
-      `SELECT id, uuid, icv, status, grand_total, currency, invoice_type, order_id 
-       FROM invoices 
-       WHERE id = $1 OR uuid = $1
-       LIMIT 1`,
-      [options.originalInvoiceId]
-    );
+    let originalInvoice: any = null;
+    if (options.originalInvoiceId) {
+      const origRes = await client.query(
+        `SELECT id, uuid, icv, status, grand_total, currency, invoice_type, order_id 
+         FROM invoices 
+         WHERE id = $1 OR uuid = $1
+         LIMIT 1`,
+        [options.originalInvoiceId]
+      );
 
-    if (origRes.rows.length === 0) {
-      throw new Error(`Original invoice ${options.originalInvoiceId} not found`);
+      if (origRes.rows.length > 0) {
+        originalInvoice = origRes.rows[0];
+      }
     }
 
-    const originalInvoice = origRes.rows[0];
+    if (!originalInvoice) {
+      if (options.externalOriginalInvoiceNumber) {
+        // Historical pre-installation invoice reference
+        originalInvoice = {
+          id: options.externalOriginalUuid || crypto.randomUUID(),
+          uuid: options.externalOriginalUuid || options.externalOriginalInvoiceNumber,
+          icv: 0,
+          status: 'external_historical',
+          grand_total: options.refundAmount * 10,
+          currency: 'SAR',
+          invoice_type: options.isB2C === false ? 'tax_invoice' : 'simplified_tax_invoice',
+          order_id: options.externalOriginalInvoiceNumber
+        };
+      } else {
+        throw new Error(
+          `Original invoice ${options.originalInvoiceId || 'unspecified'} not found. For historical orders created before bridge installation, provide externalOriginalInvoiceNumber.`
+        );
+      }
+    }
+
     const origGrandTotal = Number(originalInvoice.grand_total);
 
     if (options.refundAmount <= 0) {
@@ -1160,6 +1186,10 @@ export async function processPartialCreditNote(
 
     const idempotency = options.idempotencyKey || `cn_part_${originalInvoice.id}_${Date.now()}`;
 
+    const dbReplacesInvoiceId = options.originalInvoiceId && originalInvoice.status !== 'external_historical'
+      ? originalInvoice.id
+      : null;
+
     const cnRes = await client.query(
       `INSERT INTO invoices (
         egs_unit_id,
@@ -1194,7 +1224,7 @@ export async function processPartialCreditNote(
         signed.signedXml,
         issueDate,
         issueDateTimeIsoZ,
-        originalInvoice.id,
+        dbReplacesInvoiceId,
         netRefund,
         vatRefund,
         options.refundAmount,

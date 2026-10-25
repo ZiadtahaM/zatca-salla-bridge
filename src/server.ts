@@ -5,6 +5,7 @@ import { onboardingRoutes } from './routes/onboarding-route.js';
 import { validatorRoutes } from './routes/validator-route.js';
 import { opsRoutes } from './routes/ops-route.js';
 import { invoicePdfRoutes } from './routes/invoice-pdf-route.js';
+import { vatReturnExportRoutes } from './routes/vat-return-export-route.js';
 import { merchantPortalRoutes } from './routes/merchant-portal-route.js';
 import { standaloneApiRoutes } from './routes/standalone-api-route.js';
 import { pool, initializeDatabaseSchema } from './storage/db.js';
@@ -47,6 +48,7 @@ export function buildServer() {
   app.register(validatorRoutes);
   app.register(opsRoutes);
   app.register(invoicePdfRoutes);
+  app.register(vatReturnExportRoutes);
   app.register(merchantPortalRoutes);
   app.register(standaloneApiRoutes);
 

@@ -1,4 +1,5 @@
 import { Pool, PoolClient } from 'pg';
+import { dispatchMerchantAlert } from './alert-dispatcher.js';
 
 export interface DlqRecordParams {
   invoiceId: string;
@@ -130,6 +131,22 @@ export async function checkStalledDlqInvoices(
           ? `خطر شديد: الفاتورة ${row.invoice_id} للمتجر ${row.merchant_id} معلقة منذ ${minutesStalled} دقيقة ومهلة الـ 24 ساعة النظامية تشارف على الانتهاء!`
           : `تنبيه: الفاتورة ${row.invoice_id} للمتجر ${row.merchant_id} عالقة في طابور الأخطاء منذ ${minutesStalled} دقيقة.`
       });
+
+      dispatchMerchantAlert({
+        merchantId: row.merchant_id,
+        alertType: 'DLQ_FAILURE',
+        title: urgency === 'CRITICAL_WINDOW_CLOSING' ? 'CRITICAL: ZATCA Reporting Window Closing' : 'ZATCA DLQ Submission Stall',
+        message: urgency === 'CRITICAL_WINDOW_CLOSING'
+          ? `Invoice ${row.invoice_id} has been stalled for ${minutesStalled} minutes. The 24-hour statutory reporting window is closing.`
+          : `Invoice ${row.invoice_id} is stalled in the DLQ (${row.failure_reason}).`,
+        actionUrl: `/portal?merchantId=${encodeURIComponent(row.merchant_id)}&tab=health`,
+        metadata: {
+          invoiceId: row.invoice_id,
+          minutesStalled,
+          attemptCount: row.attempt_count,
+          failureReason: row.failure_reason
+        }
+      }).catch(() => {});
     }
 
     return alerts;

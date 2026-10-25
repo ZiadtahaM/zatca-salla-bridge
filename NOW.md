@@ -4,9 +4,16 @@
 Production-ready ZATCA Phase 2 resilient e-invoicing bridge for Saudi merchants on Salla. Fully verified across cryptographic core, ledger concurrency, operational human gates, live Fatoora quirks, merchant self-service SaaS capabilities, and a human-grade bilingual web interface.
 
 ## Verification Scorecard
-- 53 passing automated tests across 10 test suites (`npm test`).
+- 59 passing automated tests across 11 test suites (`npm test`).
 - 16 passing master verification gates (`npm run verify`).
 - 0 TypeScript compiler diagnostic errors (`npx tsc --noEmit`).
+- Real ZATCA Developer Portal format verification CLI (`tools/cli/zatca-developer-portal-live-check.ts`) passing all payload, header, and auth token checks.
+- Cryptographic HMAC-SHA256 session authentication (`auth-session.ts`) with HttpOnly cookies (`zatca_merchant_session`), query tokens, and Bearer support, preventing raw header spoofing and browser page load 401 traps.
+- Quarterly Accountant VAT Return CSV export (`GET /api/invoices/export.csv`) with UTF-8 BOM encoding for Microsoft Excel Arabic rendering, outputting Box 1 Standard Sales, Box 1 Adjustments, Net VAT Payable, and unreported invoice counts.
+- Pre-installation historical order refund support in 381 Credit Notes (`externalOriginalInvoiceNumber` and `externalOriginalInvoiceDate`) with nullable foreign key handling in PostgreSQL.
+- Mandatory Cutover Warning and legal liability waiver checkbox on production onboarding, limiting platform liability to one month's subscription fee.
+- Outbound push and webhook alerting dispatcher (`alert-dispatcher.ts`) supporting Telegram Bot API and HTTP endpoints for B2B holds and DLQ stalls.
+- Live PostgreSQL database engine integration test asserting `trg_audit_logs_immutable` raises `TAMPER_EVIDENT_PROTECTION` on real table updates and deletions.
 - Track 1 1,000-run concurrency benchmark passing with 0 duplicate ICVs and unbroken PIH chains (`npm run benchmark`).
 - PostgreSQL port bound strictly to `127.0.0.1:5432` in `docker-compose.yml`, preventing bypass of host firewall rules.
 - Native `KeyObject` private key decryption in `vault.ts` with zero-fill memory sanitization, preventing V8 heap string retention.

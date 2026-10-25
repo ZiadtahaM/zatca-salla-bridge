@@ -17,6 +17,7 @@ import {
   updateMerchantSubscription,
   isMerchantSubscriptionActive
 } from '../services/salla-oauth.js';
+import { dispatchMerchantAlert } from '../services/alert-dispatcher.js';
 
 export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post('/webhooks/salla/authorize', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -275,6 +276,16 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
                 JSON.stringify(validation.missingFields)
               ]
             );
+
+            dispatchMerchantAlert({
+              merchantId,
+              alertType: 'B2B_HOLD',
+              title: `B2B Order #${orderId} Awaiting Corporate Address`,
+              message: `Order #${orderId} for ${buyerName || 'Corporate Buyer'} is held awaiting National Address fields: ${validation.missingFields.join(', ')}`,
+              orderId,
+              actionUrl: `/portal?merchantId=${encodeURIComponent(merchantId)}&tab=b2b`,
+              metadata: { missingFields: validation.missingFields }
+            }).catch(() => {});
 
             return reply.status(200).send({
               status: 'pending_b2b_enrichment',

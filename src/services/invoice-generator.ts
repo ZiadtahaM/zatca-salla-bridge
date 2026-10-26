@@ -781,7 +781,7 @@ export async function processSallaOrderIntoZatcaInvoice(
   idempotencyKey: string
 ): Promise<GeneratedInvoiceResult> {
   return withEgsMutex(egsUnitId, async () => {
-    const isB2C = !isB2bCustomer(order.customer.tax_number);
+    const isB2C = !isB2bCustomer(order.customer?.tax_number);
     const now = new Date();
     const issueDate = now.toISOString().split('T')[0];
     const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
@@ -921,7 +921,7 @@ export async function processSallaRefundIntoZatcaCreditNote(
   returnReason: string = 'Customer return or order refund'
 ): Promise<GeneratedInvoiceResult> {
   return withEgsMutex(egsUnitId, async () => {
-    const isB2C = !isB2bCustomer(order.customer.tax_number);
+    const isB2C = !isB2bCustomer(order.customer?.tax_number);
     const now = new Date();
     const issueDate = now.toISOString().split('T')[0];
     const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;

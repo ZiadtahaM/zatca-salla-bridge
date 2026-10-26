@@ -43,8 +43,8 @@ export function resetDemoRateLimitsForTesting(): void {
 
 export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   app.get('/portal', async (request, reply) => {
-    const query = (request.query || {}) as { merchantId?: string; merchant?: string; tab?: string };
-    let merchantId = (query.merchantId || query.merchant || '').toString().trim();
+    const query = (request.query || {}) as { merchantId?: string; merchant?: string; merchant_id?: string; tab?: string };
+    let merchantId = (query.merchantId || query.merchant || query.merchant_id || '').toString().trim();
 
     let storeTokens = null;
     let subscription = null;

@@ -238,10 +238,12 @@ export async function initializeDatabaseSchema(): Promise<void> {
           idempotency_key VARCHAR(255) NOT NULL UNIQUE,
           payload JSONB NOT NULL,
           status VARCHAR(50) NOT NULL DEFAULT 'pending',
+          attempts INT NOT NULL DEFAULT 0,
           error_message TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           processed_at TIMESTAMPTZ
       );
+      ALTER TABLE webhook_queue ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
       CREATE INDEX IF NOT EXISTS idx_webhook_queue_pending ON webhook_queue (status, created_at);
 
       CREATE OR REPLACE FUNCTION prevent_audit_log_tampering()

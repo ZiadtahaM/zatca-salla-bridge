@@ -16,6 +16,7 @@ import {
 import { dispatchMerchantAlert } from '../src/services/alert-dispatcher.js';
 import { processPartialCreditNote } from '../src/services/invoice-generator.js';
 import { extractQrFromClearedXml } from '../src/services/fatoora-dispatcher.js';
+import { drainWebhookQueue } from '../src/routes/salla-webhook.js';
 import { generateValidSecp256k1TestCert } from './helpers.js';
 import { encryptVaultSecret } from '../src/crypto/vault.js';
 import { FastifyInstance } from 'fastify';
@@ -305,4 +306,135 @@ test('9. Extraction of B2B stamped QR code from clearedInvoice XML', () => {
 
   const extracted = extractQrFromClearedXml(sampleClearedXml);
   assert.equal(extracted, 'ARpTYWxsYSBUZXN0IENv...ZatcaStampedQrSignatureBase64==');
+});
+
+test('10. Magic launch link (?merchant_id=...&token=...) sets session cookie and authorizes portal', async () => {
+  const testMerchantId = 'merchant_magic_launch_' + Date.now();
+  const token = signMerchantSessionToken(testMerchantId);
+
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, access_token_encrypted, refresh_token_encrypted, expires_at,
+        token_scope, store_name, vat_number, crn, city
+      ) VALUES (
+        $1, $2, $3, NOW() + INTERVAL '30 days',
+        'offline_access', 'Magic Store', '310122393500003', '1010123456', 'Riyadh'
+      )`,
+      [testMerchantId, encryptVaultSecret('access_magic'), encryptVaultSecret('refresh_magic')]
+    );
+  } finally {
+    client.release();
+  }
+
+  // 1. Unauthenticated request without token or cookie returns 401
+  const unauthRes = await app.inject({
+    method: 'GET',
+    url: `/portal?merchant_id=${testMerchantId}`
+  });
+  assert.equal(unauthRes.statusCode, 401);
+
+  // 2. Request with valid token returns 200 and sets zatca_merchant_session cookie
+  const authRes = await app.inject({
+    method: 'GET',
+    url: `/portal?merchant_id=${testMerchantId}&token=${token}`
+  });
+  assert.equal(authRes.statusCode, 200);
+  const setCookie = authRes.headers['set-cookie'];
+  assert.ok(setCookie, 'Must set session cookie on magic launch link');
+  const cookieStr = Array.isArray(setCookie) ? setCookie.join('; ') : String(setCookie);
+  assert.ok(cookieStr.includes('zatca_merchant_session='), 'Cookie name must match');
+  assert.ok(cookieStr.includes('HttpOnly'), 'Cookie must be HttpOnly');
+
+  // 3. Subsequent request with the cookie returns 200 without token query parameter
+  const sessionCookieMatch = cookieStr.match(/zatca_merchant_session=([^;]+)/);
+  const cookieVal = sessionCookieMatch ? sessionCookieMatch[1] : '';
+  assert.ok(cookieVal);
+
+  const followUpRes = await app.inject({
+    method: 'GET',
+    url: `/portal?merchant_id=${testMerchantId}`,
+    headers: {
+      cookie: `zatca_merchant_session=${cookieVal}`
+    }
+  });
+  assert.equal(followUpRes.statusCode, 200);
+});
+
+test('11. Post-reboot webhook_queue draining processes pending orders into signed invoices', async () => {
+  const client = await pool.connect();
+  const testOrderId = (880000 + Math.floor(Math.random() * 100000)).toString();
+  const idempotencyKey = `salla:salla_demo_store:order.created:${testOrderId}:${Date.now()}`;
+
+  try {
+    // Clear any stale pending items from previous interrupted runs
+    await client.query("DELETE FROM webhook_queue WHERE status = 'pending'");
+
+    // 1. Enqueue a pending webhook as if it arrived right before a container reboot
+    const testPayload = {
+      event: 'order.created',
+      merchant: 'salla_demo_store',
+      created_at: new Date().toISOString(),
+      data: {
+        id: testOrderId,
+        reference_id: testOrderId,
+        status: { id: 1, name: 'مكتمل', slug: 'completed' },
+        payment_method: 'credit_card',
+        currency: 'SAR',
+        customer: {
+          id: 'cust_101',
+          first_name: 'سالم',
+          last_name: 'العتيبي',
+          mobile: '0501234567'
+        },
+        amounts: {
+          sub_total: { amount: 100.0, currency: 'SAR' },
+          tax: { amount: { amount: 15.0, currency: 'SAR' }, percent: 15 },
+          total: { amount: 115.0, currency: 'SAR' }
+        },
+        items: [
+          {
+            id: 'item_1',
+            name: 'عود مروكي فاخر',
+            quantity: 1,
+            price: { amount: 100.0, currency: 'SAR' },
+            total: { amount: 115.0, currency: 'SAR' }
+          }
+        ]
+      }
+    };
+
+    // Ensure merchant subscription is active
+    await client.query(
+      `INSERT INTO merchant_subscriptions (merchant_id, plan_name, status)
+       VALUES ('salla_demo_store', 'standard', 'active')
+       ON CONFLICT (merchant_id) DO UPDATE SET status = 'active'`
+    );
+
+    // Insert pending queue row
+    const queueInsert = await client.query(
+      `INSERT INTO webhook_queue (merchant_id, event_name, idempotency_key, payload, status)
+       VALUES ('salla_demo_store', 'order.created', $1, $2::jsonb, 'pending')
+       RETURNING id`,
+      [idempotencyKey, JSON.stringify(testPayload)]
+    );
+    const queueId = queueInsert.rows[0].id;
+
+    // 2. Call drainWebhookQueue (simulating startup drain)
+    const { processed, errors } = await drainWebhookQueue();
+    assert.ok(processed >= 1, 'Must process at least 1 pending webhook');
+    assert.equal(errors, 0, 'Must have 0 errors');
+
+    // 3. Verify queue row status is now 'completed'
+    const queueCheck = await client.query(`SELECT status, error_message, processed_at FROM webhook_queue WHERE id = $1`, [queueId]);
+    assert.equal(queueCheck.rows[0].status, 'completed');
+    assert.ok(queueCheck.rows[0].processed_at);
+
+    // 4. Verify invoice was generated in database
+    const invoiceCheck = await client.query(`SELECT id, uuid, icv, status FROM invoices WHERE order_id = $1`, [testOrderId]);
+    assert.ok(invoiceCheck.rows.length > 0, 'Invoice must exist in database after queue drain');
+  } finally {
+    client.release();
+  }
 });

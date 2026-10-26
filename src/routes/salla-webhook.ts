@@ -1,4 +1,5 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import type { PoolClient } from 'pg';
 import { SallaWebhookPayloadSchema, SallaWebhookPayload, SallaOrderData } from '../types/salla.js';
 import { verifySallaWebhookSignature } from '../services/webhook-verifier.js';
 import { pool } from '../storage/db.js';
@@ -120,67 +121,16 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
 
     const payload: SallaWebhookPayload = parseResult.data;
     const merchantId = payload.merchant.toString();
+    const orderData = payload.data as any;
+    const orderId = orderData?.id?.toString() || '0';
+    const idempotencyKey = `salla:${merchantId}:${payload.event}:${orderId}:${payload.created_at}`;
+
+    // Support ultra-fast async webhook queue mode (<10ms acknowledgment)
+    const query = (request.query || {}) as Record<string, any>;
+    const isAsyncMode = query.async === 'true' || process.env.WEBHOOK_ASYNC_QUEUE === 'true';
 
     const client = await pool.connect();
     try {
-      // Handle Salla App Store Billing Lifecycle Events
-      if (payload.event.startsWith('app.subscription.') || payload.event === 'app.uninstalled') {
-        const subData = (payload.data || {}) as any;
-        const planName = (subData.plan_name || 'standard').toString();
-        let status = 'active';
-
-        if (payload.event === 'app.uninstalled') {
-          status = 'uninstalled';
-        } else if (payload.event === 'app.subscription.expired') {
-          status = 'expired';
-        } else if (payload.event === 'app.subscription.canceled') {
-          status = 'canceled';
-        } else if (payload.event === 'app.subscription.started' || payload.event === 'app.subscription.renewed') {
-          status = 'active';
-        }
-
-        const expiresAt = subData.expires_at ? new Date(subData.expires_at) : null;
-        await updateMerchantSubscription(client, merchantId, planName, status, expiresAt);
-
-        return reply.status(200).send({
-          status: 'subscription_updated',
-          merchant_id: merchantId,
-          subscription_status: status
-        });
-      }
-
-      // Enforce active subscription check before processing orders
-      const subCheck = await isMerchantSubscriptionActive(client, merchantId);
-      if (!subCheck.active) {
-        if (process.env.ENFORCE_WEBHOOK_402 === 'true' || process.env.NODE_ENV === 'test') {
-          return reply.status(402).send({
-            error: 'PAYMENT_REQUIRED',
-            code: 'SUBSCRIPTION_INACTIVE',
-            message: subCheck.reason || 'Merchant subscription is inactive, expired, or canceled. Please renew on Salla App Store.'
-          });
-        }
-        return reply.status(200).send({
-          status: 'parked_unpaid_subscription',
-          code: 'SUBSCRIPTION_INACTIVE',
-          message: subCheck.reason || 'Merchant subscription is inactive. Webhook accepted and parked to prevent Salla webhook auto-suspension.'
-        });
-      }
-
-      const isRefundOrCancel = payload.event === 'order.refunded' || payload.event === 'order.cancelled';
-      const isOrderUpsert = payload.event === 'order.created' || payload.event === 'order.updated';
-
-      if (!isRefundOrCancel && !isOrderUpsert) {
-        return reply.status(200).send({ message: `Ignored event: ${payload.event}` });
-      }
-
-      const orderData = payload.data as SallaOrderData;
-      const orderId = orderData.id.toString();
-      const idempotencyKey = `salla:${merchantId}:${payload.event}:${orderId}:${payload.created_at}`;
-
-      // Support ultra-fast async webhook queue mode (<10ms acknowledgment)
-      const query = (request.query || {}) as Record<string, any>;
-      const isAsyncMode = query.async === 'true' || process.env.WEBHOOK_ASYNC_QUEUE === 'true';
-
       if (isAsyncMode) {
         const queueRes = await client.query(
           `INSERT INTO webhook_queue (merchant_id, event_name, idempotency_key, payload, status)
@@ -198,164 +148,8 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
         });
       }
 
-      const existing = await client.query(
-        `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status 
-         FROM invoices 
-         WHERE idempotency_key = $1`,
-        [idempotencyKey]
-      );
-
-      if (existing.rows.length > 0) {
-        const inv = existing.rows[0];
-        return reply.status(200).send({
-          status: 'idempotent_replay',
-          invoice_id: inv.id,
-          invoice_uuid: inv.uuid,
-          icv: inv.icv,
-          invoice_hash: inv.invoice_hash,
-          qr_code: inv.qr_code_payload,
-          invoice_status: inv.status
-        });
-      }
-
-      const sallaBranchId = (payload.data as any).branch_id?.toString() || (payload.data as any).shipping?.branch_id?.toString();
-      const terminalId = (payload.data as any).terminal_id?.toString();
-
-      let resolvedUnit;
-      try {
-        resolvedUnit = await resolveEgsUnitForOrder(client, {
-          merchantId,
-          sallaBranchId,
-          terminalId
-        });
-      } catch (err: any) {
-        return reply.status(422).send({
-          error: `No active EGS unit registered for Salla merchant: ${merchantId}`
-        });
-      }
-
-      const egsUnitId = resolvedUnit.id;
-
-      if (isOrderUpsert) {
-        const existingOrderInvoice = await client.query(
-          `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status 
-           FROM invoices 
-           WHERE order_id = $1 AND egs_unit_id = $2
-             AND invoice_type IN ('simplified_tax_invoice', 'tax_invoice')
-           ORDER BY created_at DESC LIMIT 1`,
-          [orderId, egsUnitId]
-        );
-
-        if (existingOrderInvoice.rows.length > 0) {
-          const inv = existingOrderInvoice.rows[0];
-          return reply.status(200).send({
-            status: 'idempotent_replay',
-            invoice_id: inv.id,
-            invoice_uuid: inv.uuid,
-            icv: inv.icv,
-            invoice_hash: inv.invoice_hash,
-            qr_code: inv.qr_code_payload,
-            invoice_status: inv.status
-          });
-        }
-
-        const paymentMethod = orderData.payment_method?.toLowerCase() || '';
-        const statusSlug = orderData.status?.slug?.toLowerCase() || '';
-        const isDeferredPaymentMethod = ['cod', 'cash_on_delivery', 'bank', 'bank_transfer'].includes(paymentMethod);
-        const isFinalizedStatus = ['completed', 'delivered'].includes(statusSlug);
-
-        if (isDeferredPaymentMethod && !isFinalizedStatus) {
-          return reply.status(200).send({
-            status: 'deferred_payment_hold',
-            order_id: orderId,
-            payment_method: orderData.payment_method,
-            order_status: orderData.status?.slug,
-            reason: 'COD and Bank Transfer orders are deferred until status reaches completed or delivered'
-          });
-        }
-
-        if (isB2bCustomer(orderData.customer?.tax_number)) {
-          const validation = validateB2bBuyerAddress(orderData);
-          if (!validation.isValid) {
-            const buyerVat = orderData.customer.tax_number!.trim();
-            const buyerName = (
-              orderData.customer.company_name ||
-              `${orderData.customer.first_name} ${orderData.customer.last_name || ''}`
-            ).trim();
-
-            const pendingRes = await client.query(
-              `INSERT INTO pending_b2b_orders (
-                merchant_id, order_id, idempotency_key, egs_unit_id,
-                buyer_vat, buyer_name, order_payload, missing_fields, status
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, 'pending_enrichment')
-              ON CONFLICT (idempotency_key) DO UPDATE SET
-                missing_fields = EXCLUDED.missing_fields,
-                order_payload = EXCLUDED.order_payload,
-                updated_at = NOW()
-              RETURNING id`,
-              [
-                merchantId,
-                orderId,
-                idempotencyKey,
-                egsUnitId,
-                buyerVat,
-                buyerName,
-                JSON.stringify(orderData),
-                JSON.stringify(validation.missingFields)
-              ]
-            );
-
-            dispatchMerchantAlert({
-              merchantId,
-              alertType: 'B2B_HOLD',
-              title: `B2B Order #${orderId} Awaiting Corporate Address`,
-              message: `Order #${orderId} for ${buyerName || 'Corporate Buyer'} is held awaiting National Address fields: ${validation.missingFields.join(', ')}`,
-              orderId,
-              actionUrl: `/portal?merchantId=${encodeURIComponent(merchantId)}&tab=b2b`,
-              metadata: { missingFields: validation.missingFields }
-            }).catch(() => {});
-
-            return reply.status(200).send({
-              status: 'pending_b2b_enrichment',
-              pending_id: pendingRes.rows[0].id,
-              order_id: orderId,
-              missing_fields: validation.missingFields,
-              enrichment_url: `/api/b2b/orders/${orderId}/enrich`
-            });
-          }
-        }
-      }
-
-      let result;
-      if (isRefundOrCancel) {
-        result = await processSallaRefundIntoZatcaCreditNote(
-          client,
-          egsUnitId,
-          orderData,
-          idempotencyKey,
-          payload.event === 'order.cancelled' ? 'Order cancelled by customer or merchant' : 'Order refunded'
-        );
-      } else {
-        result = await processSallaOrderIntoZatcaInvoice(
-          client,
-          egsUnitId,
-          orderData,
-          idempotencyKey
-        );
-      }
-
-      return reply.status(200).send({
-        status: isRefundOrCancel ? 'credit_note_issued' : 'signed_and_recorded',
-        order_id: orderId,
-        invoice_id: result.invoiceId,
-        invoice_uuid: result.invoiceUuid,
-        icv: result.icv,
-        invoice_hash: result.invoiceHash,
-        qr_code: result.qrCodeBase64,
-        is_b2c: result.isB2C,
-        document_type: isRefundOrCancel ? 'credit_note' : (result.isB2C ? 'simplified_tax_invoice' : 'tax_invoice'),
-        zatca_status: result.isB2C ? 'ready_for_reporting_24h' : 'queued_for_clearance'
-      });
+      const result = await processSallaWebhookPayload(client, payload);
+      return reply.status(result.statusCode).send(result.body);
     } finally {
       client.release();
     }
@@ -456,4 +250,304 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
       client.release();
     }
   });
+}
+
+export interface WebhookProcessOutput {
+  statusCode: number;
+  body: Record<string, any>;
+}
+
+export async function processSallaWebhookPayload(
+  client: PoolClient,
+  payload: SallaWebhookPayload
+): Promise<WebhookProcessOutput> {
+  const merchantId = payload.merchant.toString();
+
+  // Handle Salla App Store Billing Lifecycle Events
+  if (payload.event.startsWith('app.subscription.') || payload.event === 'app.uninstalled') {
+    const subData = (payload.data || {}) as any;
+    const planName = (subData.plan_name || 'standard').toString();
+    let status = 'active';
+
+    if (payload.event === 'app.uninstalled') {
+      status = 'uninstalled';
+    } else if (payload.event === 'app.subscription.expired') {
+      status = 'expired';
+    } else if (payload.event === 'app.subscription.canceled') {
+      status = 'canceled';
+    } else if (payload.event === 'app.subscription.started' || payload.event === 'app.subscription.renewed') {
+      status = 'active';
+    }
+
+    const expiresAt = subData.expires_at ? new Date(subData.expires_at) : null;
+    await updateMerchantSubscription(client, merchantId, planName, status, expiresAt);
+
+    return {
+      statusCode: 200,
+      body: {
+        status: 'subscription_updated',
+        merchant_id: merchantId,
+        subscription_status: status
+      }
+    };
+  }
+
+  // Enforce active subscription check before processing orders
+  const subCheck = await isMerchantSubscriptionActive(client, merchantId);
+  if (!subCheck.active) {
+    if (process.env.ENFORCE_WEBHOOK_402 === 'true' || process.env.NODE_ENV === 'test') {
+      return {
+        statusCode: 402,
+        body: {
+          error: 'PAYMENT_REQUIRED',
+          code: 'SUBSCRIPTION_INACTIVE',
+          message: subCheck.reason || 'Merchant subscription is inactive, expired, or canceled. Please renew on Salla App Store.'
+        }
+      };
+    }
+    return {
+      statusCode: 200,
+      body: {
+        status: 'parked_unpaid_subscription',
+        code: 'SUBSCRIPTION_INACTIVE',
+        message: subCheck.reason || 'Merchant subscription is inactive. Webhook accepted and parked to prevent Salla webhook auto-suspension.'
+      }
+    };
+  }
+
+  const isRefundOrCancel = payload.event === 'order.refunded' || payload.event === 'order.cancelled';
+  const isOrderUpsert = payload.event === 'order.created' || payload.event === 'order.updated';
+
+  if (!isRefundOrCancel && !isOrderUpsert) {
+    return {
+      statusCode: 200,
+      body: { message: `Ignored event: ${payload.event}` }
+    };
+  }
+
+  const orderData = payload.data as SallaOrderData;
+  const orderId = orderData.id.toString();
+  const idempotencyKey = `salla:${merchantId}:${payload.event}:${orderId}:${payload.created_at}`;
+
+  const existing = await client.query(
+    `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status 
+     FROM invoices 
+     WHERE idempotency_key = $1`,
+    [idempotencyKey]
+  );
+
+  if (existing.rows.length > 0) {
+    const inv = existing.rows[0];
+    return {
+      statusCode: 200,
+      body: {
+        status: 'idempotent_replay',
+        invoice_id: inv.id,
+        invoice_uuid: inv.uuid,
+        icv: inv.icv,
+        invoice_hash: inv.invoice_hash,
+        qr_code: inv.qr_code_payload,
+        invoice_status: inv.status
+      }
+    };
+  }
+
+  const sallaBranchId = (payload.data as any).branch_id?.toString() || (payload.data as any).shipping?.branch_id?.toString();
+  const terminalId = (payload.data as any).terminal_id?.toString();
+
+  let resolvedUnit;
+  try {
+    resolvedUnit = await resolveEgsUnitForOrder(client, {
+      merchantId,
+      sallaBranchId,
+      terminalId
+    });
+  } catch (err: any) {
+    return {
+      statusCode: 422,
+      body: {
+        error: `No active EGS unit registered for Salla merchant: ${merchantId}`
+      }
+    };
+  }
+
+  const egsUnitId = resolvedUnit.id;
+
+  if (isOrderUpsert) {
+    const existingOrderInvoice = await client.query(
+      `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status 
+       FROM invoices 
+       WHERE order_id = $1 AND egs_unit_id = $2
+         AND invoice_type IN ('simplified_tax_invoice', 'tax_invoice')
+       ORDER BY created_at DESC LIMIT 1`,
+      [orderId, egsUnitId]
+    );
+
+    if (existingOrderInvoice.rows.length > 0) {
+      const inv = existingOrderInvoice.rows[0];
+      return {
+        statusCode: 200,
+        body: {
+          status: 'idempotent_replay',
+          invoice_id: inv.id,
+          invoice_uuid: inv.uuid,
+          icv: inv.icv,
+          invoice_hash: inv.invoice_hash,
+          qr_code: inv.qr_code_payload,
+          invoice_status: inv.status
+        }
+      };
+    }
+
+    const paymentMethod = orderData.payment_method?.toLowerCase() || '';
+    const statusSlug = orderData.status?.slug?.toLowerCase() || '';
+    const isDeferredPaymentMethod = ['cod', 'cash_on_delivery', 'bank', 'bank_transfer'].includes(paymentMethod);
+    const isFinalizedStatus = ['completed', 'delivered'].includes(statusSlug);
+
+    if (isDeferredPaymentMethod && !isFinalizedStatus) {
+      return {
+        statusCode: 200,
+        body: {
+          status: 'deferred_payment_hold',
+          order_id: orderId,
+          payment_method: orderData.payment_method,
+          order_status: orderData.status?.slug,
+          reason: 'COD and Bank Transfer orders are deferred until status reaches completed or delivered'
+        }
+      };
+    }
+
+    if (isB2bCustomer(orderData.customer?.tax_number)) {
+      const validation = validateB2bBuyerAddress(orderData);
+      if (!validation.isValid) {
+        const buyerVat = orderData.customer.tax_number!.trim();
+        const buyerName = (
+          orderData.customer.company_name ||
+          `${orderData.customer.first_name} ${orderData.customer.last_name || ''}`
+        ).trim();
+
+        const pendingRes = await client.query(
+          `INSERT INTO pending_b2b_orders (
+            merchant_id, order_id, idempotency_key, egs_unit_id,
+            buyer_vat, buyer_name, order_payload, missing_fields, status
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, 'pending_enrichment')
+          ON CONFLICT (idempotency_key) DO UPDATE SET
+            missing_fields = EXCLUDED.missing_fields,
+            order_payload = EXCLUDED.order_payload,
+            updated_at = NOW()
+          RETURNING id`,
+          [
+            merchantId,
+            orderId,
+            idempotencyKey,
+            egsUnitId,
+            buyerVat,
+            buyerName,
+            JSON.stringify(orderData),
+            JSON.stringify(validation.missingFields)
+          ]
+        );
+
+        dispatchMerchantAlert({
+          merchantId,
+          alertType: 'B2B_HOLD',
+          title: `B2B Order #${orderId} Awaiting Corporate Address`,
+          message: `Order #${orderId} for ${buyerName || 'Corporate Buyer'} is held awaiting National Address fields: ${validation.missingFields.join(', ')}`,
+          orderId,
+          actionUrl: `/portal?merchantId=${encodeURIComponent(merchantId)}&tab=b2b`,
+          metadata: { missingFields: validation.missingFields }
+        }).catch(() => {});
+
+        return {
+          statusCode: 200,
+          body: {
+            status: 'pending_b2b_enrichment',
+            pending_id: pendingRes.rows[0].id,
+            order_id: orderId,
+            missing_fields: validation.missingFields,
+            enrichment_url: `/api/b2b/orders/${orderId}/enrich`
+          }
+        };
+      }
+    }
+  }
+
+  let result;
+  if (isRefundOrCancel) {
+    result = await processSallaRefundIntoZatcaCreditNote(
+      client,
+      egsUnitId,
+      orderData,
+      idempotencyKey,
+      payload.event === 'order.cancelled' ? 'Order cancelled by customer or merchant' : 'Order refunded'
+    );
+  } else {
+    result = await processSallaOrderIntoZatcaInvoice(
+      client,
+      egsUnitId,
+      orderData,
+      idempotencyKey
+    );
+  }
+
+  return {
+    statusCode: 200,
+    body: {
+      status: isRefundOrCancel ? 'credit_note_issued' : 'signed_and_recorded',
+      order_id: orderId,
+      invoice_id: result.invoiceId,
+      invoice_uuid: result.invoiceUuid,
+      icv: result.icv,
+      invoice_hash: result.invoiceHash,
+      qr_code: result.qrCodeBase64,
+      is_b2c: result.isB2C,
+      document_type: isRefundOrCancel ? 'credit_note' : (result.isB2C ? 'simplified_tax_invoice' : 'tax_invoice'),
+      zatca_status: result.isB2C ? 'ready_for_reporting_24h' : 'queued_for_clearance'
+    }
+  };
+}
+
+export async function drainWebhookQueue(poolInstance = pool): Promise<{ processed: number; errors: number }> {
+  const client = await poolInstance.connect();
+  let processed = 0;
+  let errors = 0;
+  try {
+    const res = await client.query(
+      `SELECT id, merchant_id, event_name, idempotency_key, payload, attempts
+       FROM webhook_queue
+       WHERE status = 'pending'
+       ORDER BY created_at ASC
+       LIMIT 50
+       FOR UPDATE SKIP LOCKED`
+    );
+
+    for (const row of res.rows) {
+      try {
+        await client.query(
+          `UPDATE webhook_queue SET status = 'processing', attempts = attempts + 1 WHERE id = $1`,
+          [row.id]
+        );
+        const rawPayload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+        const result = await processSallaWebhookPayload(client, rawPayload);
+        if (result.statusCode >= 400 && result.statusCode !== 402) {
+          throw new Error(result.body.error || result.body.message || `Processing failed with status ${result.statusCode}`);
+        }
+        await client.query(
+          `UPDATE webhook_queue SET status = 'completed', processed_at = NOW(), error_message = NULL WHERE id = $1`,
+          [row.id]
+        );
+        processed++;
+      } catch (err: any) {
+        errors++;
+        const nextStatus = ((row.attempts || 0) + 1) >= 5 ? 'failed' : 'pending';
+        await client.query(
+          `UPDATE webhook_queue SET status = $1, error_message = $2 WHERE id = $3`,
+          [nextStatus, err.message, row.id]
+        );
+      }
+    }
+  } finally {
+    client.release();
+  }
+  return { processed, errors };
 }

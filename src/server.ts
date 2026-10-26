@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import rawBody from 'fastify-raw-body';
-import { sallaWebhookRoutes } from './routes/salla-webhook.js';
+import { sallaWebhookRoutes, drainWebhookQueue } from './routes/salla-webhook.js';
 import { onboardingRoutes } from './routes/onboarding-route.js';
 import { validatorRoutes } from './routes/validator-route.js';
 import { opsRoutes } from './routes/ops-route.js';
@@ -62,6 +62,29 @@ export async function startServer() {
 
   try {
     await initializeDatabaseSchema();
+
+    // Drain pending webhooks left from before reboot or container restart
+    try {
+      const { processed, errors } = await drainWebhookQueue();
+      if (processed > 0) {
+        process.stdout.write(`Drained ${processed} pending webhook(s) on startup (${errors} errors)\n`);
+      }
+    } catch (queueErr: any) {
+      server.log.warn(`Webhook queue drain warning on startup: ${queueErr.message}`);
+    }
+
+    // Start background webhook queue drainer (runs every 5 seconds)
+    if (process.env.NODE_ENV !== 'test') {
+      const queueTimer = setInterval(async () => {
+        try {
+          await drainWebhookQueue();
+        } catch {
+          // Quiet background polling
+        }
+      }, 5000);
+      queueTimer.unref();
+    }
+
     await server.listen({ port, host });
     process.stdout.write(`ZATCA-Salla Bridge listening on ${host}:${port}\n`);
   } catch (err) {

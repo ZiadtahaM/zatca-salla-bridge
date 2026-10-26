@@ -97,7 +97,7 @@ export function authenticateMerchantRequest(
   expectedMerchantId?: string
 ): { authenticated: boolean; merchantId?: string; isDemo: boolean; error?: string; status: number } {
   const query = (request.query || {}) as Record<string, any>;
-  const requestedMerchant = (expectedMerchantId || query.merchantId || query.merchant || '').toString().trim();
+  const requestedMerchant = (expectedMerchantId || query.merchantId || query.merchant || query.merchant_id || '').toString().trim();
 
   // 1. Check for cross-tenant spoofing attempt via header
   const headerMerchant = (
@@ -165,8 +165,8 @@ export function authenticateMerchantRequest(
     }
   }
 
-  // 4. Check signed URL token in query parameter (?auth_token=... or ?token=...)
-  const queryToken = (query.auth_token || query.token || '').toString().trim();
+  // 4. Check signed URL token in query parameter (?auth_token=... or ?token=... or ?launch_token=...)
+  const queryToken = (query.auth_token || query.token || query.launch_token || '').toString().trim();
   if (queryToken) {
     const verified = verifyMerchantSessionToken(queryToken);
     if (verified.valid && verified.merchantId) {

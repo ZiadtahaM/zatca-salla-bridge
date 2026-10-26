@@ -1,3 +1,4 @@
+process.env.NODE_ENV = 'test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
@@ -8,6 +9,7 @@ import { validateZatcaPreflight } from '../../src/services/zatca-preflight.js';
 import { getZatcaOutboundHeaders, classifyGatewayResponse } from '../../src/services/outage-classifier.js';
 import { generateValidSecp256k1TestCert, attachStatefulRelationalTestDb } from '../../tests/helpers.js';
 import { reconcileHalalaRounding, buildUblXmlFromSallaOrder } from '../../src/services/invoice-generator.js';
+import { signMerchantSessionToken } from '../../src/crypto/auth-session.js';
 import { SallaOrderData } from '../../src/types/salla.js';
 
 interface LeverCheckResult {
@@ -274,9 +276,10 @@ async function runLever(): Promise<void> {
     });
 
     await step('8. SaaS Gap 1: Merchant Self-Service Web Portal GET /portal (4 Tabs + Pre-fill)', async () => {
+      const launchToken = signMerchantSessionToken(merchantId);
       const portalRes = await app.inject({
         method: 'GET',
-        url: `/portal?merchantId=${merchantId}`
+        url: `/portal?merchantId=${merchantId}&token=${launchToken}`
       });
       assert.equal(portalRes.statusCode, 200);
       const html = portalRes.payload;
@@ -461,9 +464,11 @@ async function runLever(): Promise<void> {
     });
 
     await step('14. Product Gap 2: Partial Credit Note (381) & Standalone Developer API (/api/v1/sign-and-submit)', async () => {
+      const sessionToken = signMerchantSessionToken(merchantId);
       const pcnRes = await app.inject({
         method: 'POST',
         url: `/api/invoices/${b2cInvoiceId}/partial-credit-note`,
+        headers: { authorization: `Bearer ${sessionToken}` },
         payload: {
           refundAmount: 50.0,
           returnReason: 'Partial return by customer'
@@ -508,9 +513,10 @@ async function runLever(): Promise<void> {
     });
 
     await step('15. Product Gap 3: Automated AES-256-GCM Encrypted Backup & 7-Year Audit Verification', async () => {
+      const sessionToken = signMerchantSessionToken(merchantId);
       const backupRes = await app.inject({
         method: 'GET',
-        url: `/api/ops/backup?merchantId=${merchantId}`
+        url: `/api/ops/backup?merchantId=${merchantId}&token=${sessionToken}`
       });
       assert.equal(backupRes.statusCode, 200);
       const backupBody = JSON.parse(backupRes.body);

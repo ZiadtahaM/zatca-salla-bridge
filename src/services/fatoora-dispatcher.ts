@@ -25,6 +25,19 @@ export interface FatooraDispatchResult {
   message?: string;
 }
 
+export function extractQrFromClearedXml(xml: string): string | null {
+  if (!xml || typeof xml !== 'string') return null;
+  const qrSectionMatch = /<cac:AdditionalDocumentReference>[\s\S]*?<cbc:ID>QR<\/cbc:ID>[\s\S]*?<cbc:EmbeddedDocumentBinaryObject[^>]*>([\s\S]*?)<\/cbc:EmbeddedDocumentBinaryObject>[\s\S]*?<\/cac:AdditionalDocumentReference>/i.exec(xml);
+  if (qrSectionMatch && qrSectionMatch[1]) {
+    return qrSectionMatch[1].trim();
+  }
+  const fallbackMatch = /<cbc:EmbeddedDocumentBinaryObject[^>]*>([A-Za-z0-9+/=]{20,})<\/cbc:EmbeddedDocumentBinaryObject>/i.exec(xml);
+  if (fallbackMatch && fallbackMatch[1]) {
+    return fallbackMatch[1].trim();
+  }
+  return null;
+}
+
 export async function submitInvoiceToFatoora(
   client: PoolClient | Pool,
   invoiceId: string,
@@ -118,6 +131,12 @@ export async function submitInvoiceToFatoora(
         finalClearedXml = Buffer.from(responseData.clearedInvoice, 'base64').toString('utf8');
       } catch {
         finalClearedXml = responseData.clearedInvoice;
+      }
+      if (finalClearedXml) {
+        const extractedQr = extractQrFromClearedXml(finalClearedXml);
+        if (extractedQr) {
+          finalQrCode = extractedQr;
+        }
       }
     }
 

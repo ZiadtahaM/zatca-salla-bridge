@@ -599,6 +599,7 @@ function renderPortalHtml(data: {
   const defaultStoreName = store.store_name || '';
   const defaultVat = store.vat_number || '';
   const isDemoStore = m === 'salla_demo_store';
+  const supportPhone = process.env.SUPPORT_WHATSAPP_NUMBER || '966500000000';
 
   return `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -1584,7 +1585,7 @@ function renderPortalHtml(data: {
       }
     }
   </script>
-  <a href="https://wa.me/966500000000?text=${encodeURIComponent('السلام عليكم، استفسار بخصوص تفعيل نظام الربط مع هيئة الزكاة والضريبة والجمارك')}" target="_blank" rel="noopener noreferrer" style="position: fixed; bottom: 20px; left: 20px; background: #25d366; color: white; border-radius: 50px; padding: 10px 18px; font-weight: 700; text-decoration: none; box-shadow: 0 4px 14px rgba(0,0,0,0.25); display: flex; align-items: center; gap: 8px; z-index: 9999; font-size: 0.88rem;">
+  <a href="https://wa.me/${supportPhone}?text=${encodeURIComponent('السلام عليكم، استفسار بخصوص تفعيل نظام الربط مع هيئة الزكاة والضريبة والجمارك')}" target="_blank" rel="noopener noreferrer" style="position: fixed; bottom: 20px; left: 20px; background: #25d366; color: white; border-radius: 50px; padding: 10px 18px; font-weight: 700; text-decoration: none; box-shadow: 0 4px 14px rgba(0,0,0,0.25); display: flex; align-items: center; gap: 8px; z-index: 9999; font-size: 0.88rem;">
     <span>الدعم الفني المباشر (واتساب)</span>
   </a>
 </body>

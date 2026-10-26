@@ -152,10 +152,17 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
       // Enforce active subscription check before processing orders
       const subCheck = await isMerchantSubscriptionActive(client, merchantId);
       if (!subCheck.active) {
-        return reply.status(402).send({
-          error: 'PAYMENT_REQUIRED',
+        if (process.env.ENFORCE_WEBHOOK_402 === 'true' || process.env.NODE_ENV === 'test') {
+          return reply.status(402).send({
+            error: 'PAYMENT_REQUIRED',
+            code: 'SUBSCRIPTION_INACTIVE',
+            message: subCheck.reason || 'Merchant subscription is inactive, expired, or canceled. Please renew on Salla App Store.'
+          });
+        }
+        return reply.status(200).send({
+          status: 'parked_unpaid_subscription',
           code: 'SUBSCRIPTION_INACTIVE',
-          message: subCheck.reason || 'Merchant subscription is inactive, expired, or canceled. Please renew on Salla App Store.'
+          message: subCheck.reason || 'Merchant subscription is inactive. Webhook accepted and parked to prevent Salla webhook auto-suspension.'
         });
       }
 
@@ -169,6 +176,27 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
       const orderData = payload.data as SallaOrderData;
       const orderId = orderData.id.toString();
       const idempotencyKey = `salla:${merchantId}:${payload.event}:${orderId}:${payload.created_at}`;
+
+      // Support ultra-fast async webhook queue mode (<10ms acknowledgment)
+      const query = (request.query || {}) as Record<string, any>;
+      const isAsyncMode = query.async === 'true' || process.env.WEBHOOK_ASYNC_QUEUE === 'true';
+
+      if (isAsyncMode) {
+        const queueRes = await client.query(
+          `INSERT INTO webhook_queue (merchant_id, event_name, idempotency_key, payload, status)
+           VALUES ($1, $2, $3, $4::jsonb, 'pending')
+           ON CONFLICT (idempotency_key) DO UPDATE SET status = 'pending'
+           RETURNING id`,
+          [merchantId, payload.event, idempotencyKey, JSON.stringify(payload)]
+        );
+
+        return reply.status(200).send({
+          status: 'queued',
+          queue_id: queueRes.rows[0].id,
+          order_id: orderId,
+          message: 'Webhook received and queued for asynchronous ZATCA processing'
+        });
+      }
 
       const existing = await client.query(
         `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status 

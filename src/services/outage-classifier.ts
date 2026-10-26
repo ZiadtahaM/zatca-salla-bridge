@@ -27,6 +27,26 @@ export function getZatcaOutboundHeaders(
   };
 }
 
+function extractErrorMessages(json: any): any[] {
+  if (!json || typeof json !== 'object') return [];
+  if (Array.isArray(json.validationResults?.errorMessages) && json.validationResults.errorMessages.length > 0) {
+    return json.validationResults.errorMessages;
+  }
+  if (Array.isArray(json.errors) && json.errors.length > 0) {
+    return json.errors;
+  }
+  if (Array.isArray(json.errorMessages) && json.errorMessages.length > 0) {
+    return json.errorMessages;
+  }
+  if (json.error) {
+    return [typeof json.error === 'string' ? { message: json.error } : json.error];
+  }
+  if (json.code || json.message) {
+    return [{ code: json.code, message: json.message }];
+  }
+  return [];
+}
+
 export function classifyGatewayResponse(res: HttpResponse): GatewayVerdict {
   const contentType = (res.headers['content-type'] as string) || '';
   const rayId = res.headers['cf-ray'] as string | undefined;
@@ -88,18 +108,19 @@ export function classifyGatewayResponse(res: HttpResponse): GatewayVerdict {
     };
   }
 
-  if (res.statusCode === 409) {
-    const isDuplicate =
-      res.rawBody.toLowerCase().includes('duplicate') ||
-      res.rawBody.toLowerCase().includes('already exists') ||
-      res.rawBody.toLowerCase().includes('uuid');
-    if (isDuplicate) {
-      return {
-        kind: 'duplicate_uuid_recovered',
-        data: json,
-        message: 'Invoice UUID already recorded by ZATCA during previous network attempt'
-      };
-    }
+  const lowerBody = res.rawBody.toLowerCase();
+  const isDuplicate =
+    lowerBody.includes('reported_successfully_earlier') ||
+    lowerBody.includes('invoice_already_reported') ||
+    lowerBody.includes('already exists') ||
+    (res.statusCode === 409 && (lowerBody.includes('duplicate') || lowerBody.includes('uuid')));
+
+  if (isDuplicate) {
+    return {
+      kind: 'duplicate_uuid_recovered',
+      data: json,
+      message: 'Invoice UUID already recorded by ZATCA during previous network attempt'
+    };
   }
 
   if (res.statusCode === 200) {
@@ -112,13 +133,15 @@ export function classifyGatewayResponse(res: HttpResponse): GatewayVerdict {
   }
 
   if (res.statusCode === 400 || res.statusCode === 422) {
-    const errors = json.validationResults?.errorMessages || [];
+    const errors = extractErrorMessages(json);
     return { kind: 'business_rejection', data: json, errors };
   }
 
   return {
     kind: 'business_rejection',
     data: json,
-    errors: [{ code: `HTTP_${res.statusCode}`, message: 'Unexpected status code returned' }]
+    errors: extractErrorMessages(json).length > 0
+      ? extractErrorMessages(json)
+      : [{ code: `HTTP_${res.statusCode}`, message: 'Unexpected status code returned' }]
   };
 }

@@ -9,10 +9,13 @@ import {
   signMerchantSessionToken,
   verifyMerchantSessionToken,
   authenticateMerchantRequest,
-  setMerchantSessionCookie
+  setMerchantSessionCookie,
+  signReceiptToken,
+  verifyReceiptToken
 } from '../src/crypto/auth-session.js';
 import { dispatchMerchantAlert } from '../src/services/alert-dispatcher.js';
 import { processPartialCreditNote } from '../src/services/invoice-generator.js';
+import { extractQrFromClearedXml } from '../src/services/fatoora-dispatcher.js';
 import { generateValidSecp256k1TestCert } from './helpers.js';
 import { encryptVaultSecret } from '../src/crypto/vault.js';
 import { FastifyInstance } from 'fastify';
@@ -218,4 +221,88 @@ test('6. Alert Dispatcher: Graceful fallback when webhook/telegram endpoints are
   assert.equal(result.sent, false);
   assert.equal(result.destination, 'internal_log');
   assert.equal(result.status, 'unconfigured_destination');
+});
+
+test('7. Live PostgreSQL Engine: invoices immutable trigger blocks DELETE and core field tampering', async () => {
+  const livePool = new Pool({
+    connectionString: process.env.DATABASE_URL || 'postgres://zatca_admin:secret_zatca_password@127.0.0.1:5432/zatca_ledger',
+    connectionTimeoutMillis: 4000
+  });
+
+  const client = await livePool.connect();
+  try {
+    const testUnique = `${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+    const icvRes = await client.query(`SELECT COALESCE(MAX(icv), 0) + 1 AS next_icv FROM invoices WHERE egs_unit_id = $1`, [seededEgsUnitId]);
+    const nextIcv = Number(icvRes.rows[0].next_icv);
+
+    const invRes = await client.query(
+      `INSERT INTO invoices (
+        egs_unit_id, order_id, idempotency_key, invoice_type, uuid,
+        icv, pih, invoice_hash, qr_code_payload, signed_xml,
+        status, supply_date, issue_timestamp, subtotal, tax_total, grand_total
+      ) VALUES (
+        $1, $2, $3, 'simplified_tax_invoice', gen_random_uuid(),
+        $4, 'NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODU4ZjgyYTgwMjdhMDY1ZDE4MGNkNGI3Nzg4MzBkNWU1NTc1OWQ2ODU5Nw==',
+        $5, 'qr_live_001', '<Invoice/>',
+        'signed', '2026-10-26', '2026-10-26T12:00:00Z', 100.00, 15.00, 115.00
+      ) RETURNING id`,
+      [seededEgsUnitId, `order_live_${testUnique}`, `idemp_live_${testUnique}`, nextIcv, `hash_live_${testUnique}`]
+    );
+
+    const invoiceId = invRes.rows[0].id;
+
+    // 1. Attempt DELETE - must be blocked by trigger
+    await assert.rejects(
+      async () => {
+        await client.query(`DELETE FROM invoices WHERE id = $1`, [invoiceId]);
+      },
+      (err: any) => {
+        assert.ok(err.message.includes('TAMPER_EVIDENT_PROTECTION'), 'Trigger must reject DELETE on invoices');
+        return true;
+      }
+    );
+
+    // 2. Attempt UPDATE on financial field (grand_total) - must be blocked
+    await assert.rejects(
+      async () => {
+        await client.query(`UPDATE invoices SET grand_total = 9999.00 WHERE id = $1`, [invoiceId]);
+      },
+      (err: any) => {
+        assert.ok(err.message.includes('TAMPER_EVIDENT_PROTECTION'), 'Trigger must reject UPDATE on grand_total');
+        return true;
+      }
+    );
+
+    // 3. Attempt UPDATE on status - must be allowed
+    const updateRes = await client.query(`UPDATE invoices SET status = 'cleared' WHERE id = $1 RETURNING status`, [invoiceId]);
+    assert.equal(updateRes.rows[0].status, 'cleared');
+  } finally {
+    client.release();
+    await livePool.end();
+  }
+});
+
+test('8. Customer Receipt Signing and Verification Token (?sig=)', () => {
+  const invoiceId = 'inv_customer_receipt_9988';
+  const sig = signReceiptToken(invoiceId);
+  assert.ok(sig && typeof sig === 'string');
+
+  assert.equal(verifyReceiptToken(invoiceId, sig), true);
+  assert.equal(verifyReceiptToken(invoiceId, 'tampered_sig'), false);
+  assert.equal(verifyReceiptToken('different_invoice_id', sig), false);
+});
+
+test('9. Extraction of B2B stamped QR code from clearedInvoice XML', () => {
+  const sampleClearedXml = `<?xml version="1.0" encoding="UTF-8"?>
+<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+  <cac:AdditionalDocumentReference>
+    <cbc:ID>QR</cbc:ID>
+    <cac:Attachment>
+      <cbc:EmbeddedDocumentBinaryObject mimeCode="text/plain">ARpTYWxsYSBUZXN0IENv...ZatcaStampedQrSignatureBase64==</cbc:EmbeddedDocumentBinaryObject>
+    </cac:Attachment>
+  </cac:AdditionalDocumentReference>
+</Invoice>`;
+
+  const extracted = extractQrFromClearedXml(sampleClearedXml);
+  assert.equal(extracted, 'ARpTYWxsYSBUZXN0IENv...ZatcaStampedQrSignatureBase64==');
 });

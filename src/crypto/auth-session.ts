@@ -17,6 +17,23 @@ export function signMerchantSessionToken(merchantId: string, secret = DEFAULT_SE
   return `${merchantId}.${expiresAt}.${hmac}`;
 }
 
+export function signReceiptToken(invoiceId: string, secret = DEFAULT_SECRET): string {
+  return createHmac('sha256', secret).update(`receipt:${invoiceId}`).digest('base64url');
+}
+
+export function verifyReceiptToken(
+  invoiceId: string,
+  token: string,
+  secret = DEFAULT_SECRET
+): boolean {
+  if (!token || typeof token !== 'string') return false;
+  const expected = signReceiptToken(invoiceId, secret);
+  const bufExpected = Buffer.from(expected);
+  const bufProvided = Buffer.from(token);
+  if (bufExpected.length !== bufProvided.length) return false;
+  return timingSafeEqual(bufExpected, bufProvided);
+}
+
 export function verifyMerchantSessionToken(
   token: string,
   secret = DEFAULT_SECRET
@@ -165,17 +182,17 @@ export function authenticateMerchantRequest(
     }
   }
 
-  // 5. Public demo store or direct browser visit with valid merchant parameter
+  // 5. Public demo store
   if (requestedMerchant === 'salla_demo_store' || (!requestedMerchant && !expectedMerchantId)) {
     return { authenticated: true, merchantId: 'salla_demo_store', isDemo: true, status: 200 };
   }
 
-  // For portal page loads and invoice view/downloads (customer receipts), allow access
-  // and issue the signed session cookie for subsequent requests if no conflicting credentials exist
+  // 6. Real merchants require a verified session cookie, bearer header, or signed Salla launch token (?token / ?auth_token)
   return {
-    authenticated: true,
+    authenticated: false,
     merchantId: requestedMerchant,
     isDemo: false,
-    status: 200
+    status: 401,
+    error: 'Merchant authentication required. Please login via Salla or provide a signed session token.'
   };
 }

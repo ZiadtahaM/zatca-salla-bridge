@@ -17,6 +17,7 @@ import {
   generateZatcaCsr,
   getZatcaBaseUrl
 } from '../src/services/csr-generator.js';
+import { signMerchantSessionToken } from '../src/crypto/auth-session.js';
 import {
   onboardEgsUnit,
   renewProductionCsid,
@@ -78,9 +79,18 @@ test('Gap 1: Merchant Self-Service Web Portal GET /portal renders all 4 tabs and
     client.release();
   }
 
-  const res = await app.inject({
+  // 1. Unauthenticated portal visit without token or session cookie is blocked with 401
+  const unauthorizedRes = await app.inject({
     method: 'GET',
     url: `/portal?merchantId=${merchantId}`
+  });
+  assert.equal(unauthorizedRes.statusCode, 401);
+
+  // 2. Authenticated portal visit with valid Salla launch token succeeds
+  const sessionToken = signMerchantSessionToken(merchantId);
+  const res = await app.inject({
+    method: 'GET',
+    url: `/portal?merchantId=${merchantId}&token=${sessionToken}`
   });
 
   assert.equal(res.statusCode, 200);

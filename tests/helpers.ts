@@ -463,6 +463,13 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       return { rows: [], rowCount: unit ? 1 : 0 };
     }
 
+    if (normalized.includes('MAX(icv)') && normalized.includes('FROM invoices')) {
+      const egsId = params[0];
+      const matching = egsId ? invoices.filter((i) => i.egs_unit_id === egsId) : invoices;
+      const maxIcv = matching.reduce((max, i) => Math.max(max, Number(i.icv) || 0), 0);
+      return { rows: [{ max_icv: maxIcv }], rowCount: 1 };
+    }
+
     if (normalized.includes('FROM invoices WHERE idempotency_key = $1')) {
       const rows = invoices.filter((i) => i.idempotency_key === params[0]);
       return { rows, rowCount: rows.length };

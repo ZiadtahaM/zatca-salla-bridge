@@ -231,6 +231,19 @@ export async function initializeDatabaseSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs(entity_type, entity_id);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
 
+      CREATE TABLE IF NOT EXISTS webhook_queue (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          merchant_id VARCHAR(100) NOT NULL,
+          event_name VARCHAR(100) NOT NULL,
+          idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+          payload JSONB NOT NULL,
+          status VARCHAR(50) NOT NULL DEFAULT 'pending',
+          error_message TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          processed_at TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS idx_webhook_queue_pending ON webhook_queue (status, created_at);
+
       CREATE OR REPLACE FUNCTION prevent_audit_log_tampering()
       RETURNS TRIGGER AS $$
       BEGIN
@@ -246,6 +259,41 @@ export async function initializeDatabaseSchema(): Promise<void> {
               BEFORE UPDATE OR DELETE ON audit_logs
               FOR EACH ROW
               EXECUTE FUNCTION prevent_audit_log_tampering();
+          END IF;
+      EXCEPTION
+          WHEN duplicate_object THEN null;
+      END $$;
+
+      CREATE OR REPLACE FUNCTION prevent_invoice_tampering()
+      RETURNS TRIGGER AS $$
+      BEGIN
+          IF (TG_OP = 'DELETE') THEN
+              RAISE EXCEPTION 'TAMPER_EVIDENT_PROTECTION: DELETE operations are strictly forbidden on invoices';
+          END IF;
+          IF (TG_OP = 'UPDATE') THEN
+              IF (OLD.uuid IS DISTINCT FROM NEW.uuid OR
+                  OLD.icv IS DISTINCT FROM NEW.icv OR
+                  OLD.pih IS DISTINCT FROM NEW.pih OR
+                  OLD.invoice_hash IS DISTINCT FROM NEW.invoice_hash OR
+                  OLD.signed_xml IS DISTINCT FROM NEW.signed_xml OR
+                  OLD.subtotal IS DISTINCT FROM NEW.subtotal OR
+                  OLD.tax_total IS DISTINCT FROM NEW.tax_total OR
+                  OLD.grand_total IS DISTINCT FROM NEW.grand_total) THEN
+                  RAISE EXCEPTION 'TAMPER_EVIDENT_PROTECTION: Core financial and cryptographic invoice fields are immutable';
+              END IF;
+          END IF;
+          RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      DO $$ BEGIN
+          IF NOT EXISTS (
+              SELECT 1 FROM pg_trigger WHERE tgname = 'trg_invoices_immutable'
+          ) THEN
+              CREATE TRIGGER trg_invoices_immutable
+              BEFORE UPDATE OR DELETE ON invoices
+              FOR EACH ROW
+              EXECUTE FUNCTION prevent_invoice_tampering();
           END IF;
       EXCEPTION
           WHEN duplicate_object THEN null;

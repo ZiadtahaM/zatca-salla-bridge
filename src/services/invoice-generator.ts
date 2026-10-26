@@ -747,136 +747,170 @@ ${linesXml}
 </Invoice>`;
 }
 
+const egsMutexMap = new Map<string, Promise<any>>();
+
+export async function withEgsMutex<T>(egsUnitId: string, fn: () => Promise<T>): Promise<T> {
+  while (egsMutexMap.has(egsUnitId)) {
+    try {
+      await egsMutexMap.get(egsUnitId);
+    } catch {
+      // previous invocation completed, continue chain
+    }
+  }
+
+  let resolveMutex: () => void;
+  const mutexPromise = new Promise<void>((resolve) => {
+    resolveMutex = resolve;
+  });
+  egsMutexMap.set(egsUnitId, mutexPromise);
+
+  try {
+    return await fn();
+  } finally {
+    if (egsMutexMap.get(egsUnitId) === mutexPromise) {
+      egsMutexMap.delete(egsUnitId);
+    }
+    resolveMutex!();
+  }
+}
+
 export async function processSallaOrderIntoZatcaInvoice(
   client: PoolClient,
   egsUnitId: string,
   order: SallaOrderData,
   idempotencyKey: string
 ): Promise<GeneratedInvoiceResult> {
-  const isB2C = !isB2bCustomer(order.customer.tax_number);
-  const now = new Date();
-  const issueDate = now.toISOString().split('T')[0];
-  const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
-  const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
-  const invoiceUuid = crypto.randomUUID();
+  return withEgsMutex(egsUnitId, async () => {
+    const isB2C = !isB2bCustomer(order.customer.tax_number);
+    const now = new Date();
+    const issueDate = now.toISOString().split('T')[0];
+    const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
+    const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
+    const invoiceUuid = crypto.randomUUID();
 
-  await client.query('BEGIN');
+    await client.query('BEGIN');
 
-  try {
-    const egsRes = await client.query(
-      `SELECT id, merchant_id, current_icv, last_document_hash, 
-              private_key_pem, csid_secret, certificate, expires_at, csid_environment
-       FROM egs_units 
-       WHERE id = $1 FOR UPDATE`,
-      [egsUnitId]
-    );
+    try {
+      const egsRes = await client.query(
+        `SELECT id, merchant_id, current_icv, last_document_hash, 
+                private_key_pem, csid_secret, certificate, expires_at, csid_environment
+         FROM egs_units 
+         WHERE id = $1 FOR UPDATE`,
+        [egsUnitId]
+      );
 
-    if (egsRes.rows.length === 0) {
-      throw new Error(`EGS Unit ${egsUnitId} not found`);
-    }
+      if (egsRes.rows.length === 0) {
+        throw new Error(`EGS Unit ${egsUnitId} not found`);
+      }
 
-    const egs = egsRes.rows[0];
+      const egs = egsRes.rows[0];
 
-    if (new Date(egs.expires_at) <= new Date()) {
-      throw new Error(`EGS Unit ${egsUnitId} certificate expired on ${egs.expires_at}`);
-    }
+      if (new Date(egs.expires_at) <= new Date()) {
+        throw new Error(`EGS Unit ${egsUnitId} certificate expired on ${egs.expires_at}`);
+      }
 
-    const nextIcv = Number(egs.current_icv) + 1;
-    const currentPih = egs.last_document_hash;
+      const maxIcvRes = await client.query(
+        `SELECT COALESCE(MAX(icv), 0) AS max_icv FROM invoices WHERE egs_unit_id = $1`,
+        [egs.id]
+      );
+      const maxIcvInDb = Number(maxIcvRes?.rows?.[0]?.max_icv ?? 0);
+      const nextIcv = Math.max(Number(egs.current_icv), maxIcvInDb) + 1;
+      const currentPih = egs.last_document_hash;
 
-    const rawXml = buildUblXmlFromSallaOrder({
-      order,
-      uuid: invoiceUuid,
-      icv: nextIcv,
-      pih: currentPih,
-      issueDate,
-      issueTime,
-      sellerNameArabic: 'شركة رواء للملابس الفاخرة',
-      sellerVat: '300075588700003',
-      sellerCrn: '1010010000',
-      isB2C
-    });
-
-    const discountAmount = order.amounts.discounts?.amount || 0;
-    const shippingAmount = order.amounts.shipping_cost?.amount || 0;
-    const codAmount = order.amounts.cash_on_delivery?.amount || 0;
-    const chargeAmount = shippingAmount + codAmount;
-
-    const lineExtensionTotal = order.amounts.sub_total.amount;
-    const allowanceTotal = discountAmount;
-    const chargeTotal = chargeAmount;
-    const taxExclusiveAmount = Number((lineExtensionTotal - allowanceTotal + chargeTotal).toFixed(2));
-    const declaredTaxTotal = order.amounts.tax.amount.amount;
-    const grandTotal = Number((taxExclusiveAmount + declaredTaxTotal).toFixed(2));
-
-    const privateKey = decryptVaultPrivateKey(egs.private_key_pem);
-
-    const signed: SignOutput = signZatcaInvoiceExact({
-      rawXml,
-      privateKeyPem: privateKey,
-      certPem: egs.certificate,
-      sellerNameArabic: 'شركة رواء للملابس الفاخرة',
-      sellerVatNumber: '300075588700003',
-      grandTotal: grandTotal.toFixed(2),
-      vatTotal: declaredTaxTotal.toFixed(2),
-      issueDateTimeIsoZ,
-      isB2C
-    });
-
-    const invoiceRes = await client.query(
-      `INSERT INTO invoices (
-        egs_unit_id, order_id, idempotency_key, invoice_type, uuid,
-        icv, pih, invoice_hash, qr_code_payload, signed_xml,
-        status, supply_date, issue_timestamp, subtotal, tax_total, grand_total
-      ) VALUES (
-        $1, $2, $3, $4, $5,
-        $6, $7, $8, $9, $10,
-        'signed', $11, $12, $13, $14, $15
-      ) RETURNING id`,
-      [
-        egs.id,
-        order.id.toString(),
-        idempotencyKey,
-        isB2C ? 'simplified_tax_invoice' : 'tax_invoice',
-        invoiceUuid,
-        nextIcv,
-        currentPih,
-        signed.invoiceHashBase64,
-        signed.qrCodeBase64,
-        signed.signedXml,
+      const rawXml = buildUblXmlFromSallaOrder({
+        order,
+        uuid: invoiceUuid,
+        icv: nextIcv,
+        pih: currentPih,
         issueDate,
+        issueTime,
+        sellerNameArabic: 'شركة رواء للملابس الفاخرة',
+        sellerVat: '300075588700003',
+        sellerCrn: '1010010000',
+        isB2C
+      });
+
+      const discountAmount = order.amounts.discounts?.amount || 0;
+      const shippingAmount = order.amounts.shipping_cost?.amount || 0;
+      const codAmount = order.amounts.cash_on_delivery?.amount || 0;
+      const chargeAmount = shippingAmount + codAmount;
+
+      const lineExtensionTotal = order.amounts.sub_total.amount;
+      const allowanceTotal = discountAmount;
+      const chargeTotal = chargeAmount;
+      const taxExclusiveAmount = Number((lineExtensionTotal - allowanceTotal + chargeTotal).toFixed(2));
+      const declaredTaxTotal = order.amounts.tax.amount.amount;
+      const grandTotal = Number((taxExclusiveAmount + declaredTaxTotal).toFixed(2));
+
+      const privateKey = decryptVaultPrivateKey(egs.private_key_pem);
+
+      const signed: SignOutput = signZatcaInvoiceExact({
+        rawXml,
+        privateKeyPem: privateKey,
+        certPem: egs.certificate,
+        sellerNameArabic: 'شركة رواء للملابس الفاخرة',
+        sellerVatNumber: '300075588700003',
+        grandTotal: grandTotal.toFixed(2),
+        vatTotal: declaredTaxTotal.toFixed(2),
         issueDateTimeIsoZ,
-        lineExtensionTotal,
-        declaredTaxTotal,
-        grandTotal
-      ]
-    );
+        isB2C
+      });
 
-    await client.query(
-      `UPDATE egs_units 
-       SET current_icv = $1, 
-           last_document_hash = $2, 
-           updated_at = NOW() 
-       WHERE id = $3`,
-      [nextIcv, signed.invoiceHashBase64, egs.id]
-    );
+      const invoiceRes = await client.query(
+        `INSERT INTO invoices (
+          egs_unit_id, order_id, idempotency_key, invoice_type, uuid,
+          icv, pih, invoice_hash, qr_code_payload, signed_xml,
+          status, supply_date, issue_timestamp, subtotal, tax_total, grand_total
+        ) VALUES (
+          $1, $2, $3, $4, $5,
+          $6, $7, $8, $9, $10,
+          'signed', $11, $12, $13, $14, $15
+        ) RETURNING id`,
+        [
+          egs.id,
+          order.id.toString(),
+          idempotencyKey,
+          isB2C ? 'simplified_tax_invoice' : 'tax_invoice',
+          invoiceUuid,
+          nextIcv,
+          currentPih,
+          signed.invoiceHashBase64,
+          signed.qrCodeBase64,
+          signed.signedXml,
+          issueDate,
+          issueDateTimeIsoZ,
+          lineExtensionTotal,
+          declaredTaxTotal,
+          grandTotal
+        ]
+      );
 
-    await client.query('COMMIT');
+      await client.query(
+        `UPDATE egs_units 
+         SET current_icv = $1, 
+             last_document_hash = $2, 
+             updated_at = NOW() 
+         WHERE id = $3`,
+        [nextIcv, signed.invoiceHashBase64, egs.id]
+      );
 
-    return {
-      invoiceId: invoiceRes.rows[0].id,
-      invoiceUuid,
-      icv: nextIcv,
-      pih: currentPih,
-      invoiceHash: signed.invoiceHashBase64,
-      qrCodeBase64: signed.qrCodeBase64,
-      signedXml: signed.signedXml,
-      isB2C
-    };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  }
+      await client.query('COMMIT');
+
+      return {
+        invoiceId: invoiceRes.rows[0].id,
+        invoiceUuid,
+        icv: nextIcv,
+        pih: currentPih,
+        invoiceHash: signed.invoiceHashBase64,
+        qrCodeBase64: signed.qrCodeBase64,
+        signedXml: signed.signedXml,
+        isB2C
+      };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    }
+  });
 }
 
 export async function processSallaRefundIntoZatcaCreditNote(
@@ -886,16 +920,17 @@ export async function processSallaRefundIntoZatcaCreditNote(
   idempotencyKey: string,
   returnReason: string = 'Customer return or order refund'
 ): Promise<GeneratedInvoiceResult> {
-  const isB2C = !isB2bCustomer(order.customer.tax_number);
-  const now = new Date();
-  const issueDate = now.toISOString().split('T')[0];
-  const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
-  const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
-  const creditNoteUuid = crypto.randomUUID();
+  return withEgsMutex(egsUnitId, async () => {
+    const isB2C = !isB2bCustomer(order.customer.tax_number);
+    const now = new Date();
+    const issueDate = now.toISOString().split('T')[0];
+    const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
+    const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
+    const creditNoteUuid = crypto.randomUUID();
 
-  await client.query('BEGIN');
+    await client.query('BEGIN');
 
-  try {
+    try {
     const origRes = await client.query(
       `SELECT id, uuid, icv, status 
        FROM invoices 
@@ -923,7 +958,12 @@ export async function processSallaRefundIntoZatcaCreditNote(
     }
 
     const egs = egsRes.rows[0];
-    const nextIcv = Number(egs.current_icv) + 1;
+    const maxIcvRes = await client.query(
+      `SELECT COALESCE(MAX(icv), 0) AS max_icv FROM invoices WHERE egs_unit_id = $1`,
+      [egs.id]
+    );
+    const maxIcvInDb = Number(maxIcvRes?.rows?.[0]?.max_icv ?? 0);
+    const nextIcv = Math.max(Number(egs.current_icv), maxIcvInDb) + 1;
     const currentPih = egs.last_document_hash;
 
     const rawCreditNoteXml = buildUblCreditNoteXmlFromSallaRefund({
@@ -1023,6 +1063,7 @@ export async function processSallaRefundIntoZatcaCreditNote(
     await client.query('ROLLBACK');
     throw err;
   }
+  });
 }
 
 export interface ProcessPartialCreditNoteOptions {
@@ -1042,16 +1083,17 @@ export async function processPartialCreditNote(
   egsUnitId: string,
   options: ProcessPartialCreditNoteOptions
 ): Promise<GeneratedInvoiceResult> {
-  const returnReason = options.returnReason || 'Partial customer refund';
-  const now = new Date();
-  const issueDate = now.toISOString().split('T')[0];
-  const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
-  const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
-  const creditNoteUuid = crypto.randomUUID();
+  return withEgsMutex(egsUnitId, async () => {
+    const returnReason = options.returnReason || 'Partial customer refund';
+    const now = new Date();
+    const issueDate = now.toISOString().split('T')[0];
+    const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
+    const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
+    const creditNoteUuid = crypto.randomUUID();
 
-  await client.query('BEGIN');
+    await client.query('BEGIN');
 
-  try {
+    try {
     let originalInvoice: any = null;
     if (options.originalInvoiceId) {
       const origRes = await client.query(
@@ -1109,7 +1151,12 @@ export async function processPartialCreditNote(
     }
 
     const egs = egsRes.rows[0];
-    const nextIcv = Number(egs.current_icv) + 1;
+    const maxIcvRes = await client.query(
+      `SELECT COALESCE(MAX(icv), 0) AS max_icv FROM invoices WHERE egs_unit_id = $1`,
+      [egs.id]
+    );
+    const maxIcvInDb = Number(maxIcvRes?.rows?.[0]?.max_icv ?? 0);
+    const nextIcv = Math.max(Number(egs.current_icv), maxIcvInDb) + 1;
     const currentPih = egs.last_document_hash;
     const isB2C = originalInvoice.invoice_type === 'simplified_tax_invoice';
 
@@ -1257,4 +1304,5 @@ export async function processPartialCreditNote(
     await client.query('ROLLBACK');
     throw err;
   }
+  });
 }

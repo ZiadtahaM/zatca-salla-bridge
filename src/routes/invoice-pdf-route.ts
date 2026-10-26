@@ -212,7 +212,7 @@ export async function invoicePdfRoutes(fastify: FastifyInstance): Promise<void> 
       return reply.status(404).send({ error: `Invoice QR not found: ${id}` });
     }
 
-    const authCheck = checkInvoiceTenantAuth(request, row.merchant_id);
+    const authCheck = checkInvoiceTenantAuth(request, row.merchant_id, row.id, row.uuid);
     if (!authCheck.allowed) {
       return reply.status(authCheck.status).send({
         error: authCheck.status === 403 ? 'FORBIDDEN' : 'UNAUTHORIZED',

@@ -774,11 +774,18 @@ export async function withEgsMutex<T>(egsUnitId: string, fn: () => Promise<T>): 
   }
 }
 
+export interface ProcessInvoiceOverrides {
+  sellerNameArabic?: string;
+  sellerVat?: string;
+  sellerCrn?: string;
+}
+
 export async function processSallaOrderIntoZatcaInvoice(
   client: PoolClient,
   egsUnitId: string,
   order: SallaOrderData,
-  idempotencyKey: string
+  idempotencyKey: string,
+  overrides?: ProcessInvoiceOverrides
 ): Promise<GeneratedInvoiceResult> {
   return withEgsMutex(egsUnitId, async () => {
     const isB2C = !isB2bCustomer(order.customer?.tax_number);
@@ -792,10 +799,14 @@ export async function processSallaOrderIntoZatcaInvoice(
 
     try {
       const egsRes = await client.query(
-        `SELECT id, merchant_id, current_icv, last_document_hash, 
-                private_key_pem, csid_secret, certificate, expires_at, csid_environment
-         FROM egs_units 
-         WHERE id = $1 FOR UPDATE`,
+        `SELECT e.id, e.merchant_id, e.branch_id, e.current_icv, e.last_document_hash, 
+                e.private_key_pem, e.csid_secret, e.certificate, e.expires_at, e.csid_environment,
+                COALESCE(e.crn, m.crn, '1010010000') AS seller_crn,
+                COALESCE(e.vat_number, m.vat_number, '300075588700003') AS seller_vat,
+                COALESCE(e.branch_name, m.store_name, 'شركة رواء للملابس الفاخرة') AS seller_name_arabic
+         FROM egs_units e
+         LEFT JOIN merchant_tokens m ON e.merchant_id = m.merchant_id
+         WHERE e.id = $1 FOR UPDATE OF e`,
         [egsUnitId]
       );
 
@@ -808,6 +819,10 @@ export async function processSallaOrderIntoZatcaInvoice(
       if (new Date(egs.expires_at) <= new Date()) {
         throw new Error(`EGS Unit ${egsUnitId} certificate expired on ${egs.expires_at}`);
       }
+
+      const resolvedSellerCrn = overrides?.sellerCrn || egs.seller_crn;
+      const resolvedSellerVat = overrides?.sellerVat || egs.seller_vat;
+      const resolvedSellerName = overrides?.sellerNameArabic || egs.seller_name_arabic;
 
       const maxIcvRes = await client.query(
         `SELECT COALESCE(MAX(icv), 0) AS max_icv FROM invoices WHERE egs_unit_id = $1`,
@@ -824,9 +839,9 @@ export async function processSallaOrderIntoZatcaInvoice(
         pih: currentPih,
         issueDate,
         issueTime,
-        sellerNameArabic: 'شركة رواء للملابس الفاخرة',
-        sellerVat: '300075588700003',
-        sellerCrn: '1010010000',
+        sellerNameArabic: resolvedSellerName,
+        sellerVat: resolvedSellerVat,
+        sellerCrn: resolvedSellerCrn,
         isB2C
       });
 
@@ -848,8 +863,8 @@ export async function processSallaOrderIntoZatcaInvoice(
         rawXml,
         privateKeyPem: privateKey,
         certPem: egs.certificate,
-        sellerNameArabic: 'شركة رواء للملابس الفاخرة',
-        sellerVatNumber: '300075588700003',
+        sellerNameArabic: resolvedSellerName,
+        sellerVatNumber: resolvedSellerVat,
         grandTotal: grandTotal.toFixed(2),
         vatTotal: declaredTaxTotal.toFixed(2),
         issueDateTimeIsoZ,
@@ -918,7 +933,8 @@ export async function processSallaRefundIntoZatcaCreditNote(
   egsUnitId: string,
   order: SallaOrderData,
   idempotencyKey: string,
-  returnReason: string = 'Customer return or order refund'
+  returnReason: string = 'Customer return or order refund',
+  overrides?: ProcessInvoiceOverrides
 ): Promise<GeneratedInvoiceResult> {
   return withEgsMutex(egsUnitId, async () => {
     const isB2C = !isB2bCustomer(order.customer?.tax_number);
@@ -946,10 +962,14 @@ export async function processSallaRefundIntoZatcaCreditNote(
     const originalInvoice = origRes.rows[0];
 
     const egsRes = await client.query(
-      `SELECT id, merchant_id, current_icv, last_document_hash, 
-              private_key_pem, csid_secret, certificate, expires_at, csid_environment
-       FROM egs_units 
-       WHERE id = $1 FOR UPDATE`,
+      `SELECT e.id, e.merchant_id, e.current_icv, e.last_document_hash, 
+              e.private_key_pem, e.csid_secret, e.certificate, e.expires_at, e.csid_environment,
+              COALESCE(e.crn, m.crn, '1010010000') AS seller_crn,
+              COALESCE(e.vat_number, m.vat_number, '300075588700003') AS seller_vat,
+              COALESCE(e.branch_name, m.store_name, 'شركة رواء للملابس الفاخرة') AS seller_name_arabic
+       FROM egs_units e
+       LEFT JOIN merchant_tokens m ON e.merchant_id = m.merchant_id
+       WHERE e.id = $1 FOR UPDATE OF e`,
       [egsUnitId]
     );
 
@@ -958,6 +978,11 @@ export async function processSallaRefundIntoZatcaCreditNote(
     }
 
     const egs = egsRes.rows[0];
+
+    const resolvedSellerCrn = overrides?.sellerCrn || egs.seller_crn;
+    const resolvedSellerVat = overrides?.sellerVat || egs.seller_vat;
+    const resolvedSellerName = overrides?.sellerNameArabic || egs.seller_name_arabic;
+
     const maxIcvRes = await client.query(
       `SELECT COALESCE(MAX(icv), 0) AS max_icv FROM invoices WHERE egs_unit_id = $1`,
       [egs.id]
@@ -976,9 +1001,9 @@ export async function processSallaRefundIntoZatcaCreditNote(
       pih: currentPih,
       issueDate,
       issueTime,
-      sellerNameArabic: 'شركة رواء للملابس الفاخرة',
-      sellerVat: '300075588700003',
-      sellerCrn: '1010010000',
+      sellerNameArabic: resolvedSellerName,
+      sellerVat: resolvedSellerVat,
+      sellerCrn: resolvedSellerCrn,
       isB2C
     });
 
@@ -1000,8 +1025,8 @@ export async function processSallaRefundIntoZatcaCreditNote(
       rawXml: rawCreditNoteXml,
       privateKeyPem: privateKey,
       certPem: egs.certificate,
-      sellerNameArabic: 'شركة رواء للملابس الفاخرة',
-      sellerVatNumber: '300075588700003',
+      sellerNameArabic: resolvedSellerName,
+      sellerVatNumber: resolvedSellerVat,
       grandTotal: grandTotal.toFixed(2),
       vatTotal: declaredTaxTotal.toFixed(2),
       issueDateTimeIsoZ,
@@ -1076,6 +1101,9 @@ export interface ProcessPartialCreditNoteOptions {
   returnReason?: string;
   items?: Array<{ name: string; quantity: number; price: number }>;
   idempotencyKey?: string;
+  sellerNameArabic?: string;
+  sellerVat?: string;
+  sellerCrn?: string;
 }
 
 export async function processPartialCreditNote(
@@ -1139,10 +1167,14 @@ export async function processPartialCreditNote(
     }
 
     const egsRes = await client.query(
-      `SELECT id, merchant_id, current_icv, last_document_hash, 
-              private_key_pem, csid_secret, certificate, expires_at, csid_environment
-       FROM egs_units 
-       WHERE id = $1 FOR UPDATE`,
+      `SELECT e.id, e.merchant_id, e.current_icv, e.last_document_hash, 
+              e.private_key_pem, e.csid_secret, e.certificate, e.expires_at, e.csid_environment,
+              COALESCE(e.crn, m.crn, '1010010000') AS seller_crn,
+              COALESCE(e.vat_number, m.vat_number, '300075588700003') AS seller_vat,
+              COALESCE(e.branch_name, m.store_name, 'شركة رواء للملابس الفاخرة') AS seller_name_arabic
+       FROM egs_units e
+       LEFT JOIN merchant_tokens m ON e.merchant_id = m.merchant_id
+       WHERE e.id = $1 FOR UPDATE OF e`,
       [egsUnitId]
     );
 
@@ -1151,6 +1183,11 @@ export async function processPartialCreditNote(
     }
 
     const egs = egsRes.rows[0];
+
+    const resolvedSellerCrn = options.sellerCrn || egs.seller_crn;
+    const resolvedSellerVat = options.sellerVat || egs.seller_vat;
+    const resolvedSellerName = options.sellerNameArabic || egs.seller_name_arabic;
+
     const maxIcvRes = await client.query(
       `SELECT COALESCE(MAX(icv), 0) AS max_icv FROM invoices WHERE egs_unit_id = $1`,
       [egs.id]
@@ -1173,7 +1210,7 @@ export async function processPartialCreditNote(
       customer: {
         id: 1,
         first_name: 'Customer',
-        tax_number: isB2C ? null : '300075588700003'
+        tax_number: isB2C ? null : resolvedSellerVat
       },
       items: options.items && options.items.length > 0
         ? options.items.map((it, idx) => ({
@@ -1212,9 +1249,9 @@ export async function processPartialCreditNote(
       pih: currentPih,
       issueDate,
       issueTime,
-      sellerNameArabic: 'شركة رواء للملابس الفاخرة',
-      sellerVat: '300075588700003',
-      sellerCrn: '1010010000',
+      sellerNameArabic: resolvedSellerName,
+      sellerVat: resolvedSellerVat,
+      sellerCrn: resolvedSellerCrn,
       isB2C
     });
 
@@ -1223,8 +1260,8 @@ export async function processPartialCreditNote(
       rawXml: rawCreditNoteXml,
       privateKeyPem: privateKey,
       certPem: egs.certificate,
-      sellerNameArabic: 'شركة رواء للملابس الفاخرة',
-      sellerVatNumber: '300075588700003',
+      sellerNameArabic: resolvedSellerName,
+      sellerVatNumber: resolvedSellerVat,
       grandTotal: options.refundAmount.toFixed(2),
       vatTotal: vatRefund.toFixed(2),
       issueDateTimeIsoZ,

@@ -85,6 +85,9 @@ export async function initializeDatabaseSchema(): Promise<void> {
       ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS csid_secret TEXT;
       ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS renewal_status VARCHAR(32) NOT NULL DEFAULT 'active';
       ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS last_renewal_alert_at TIMESTAMPTZ;
+      ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS crn VARCHAR(32);
+      ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS vat_number VARCHAR(15);
+      ALTER TABLE egs_units ADD COLUMN IF NOT EXISTS branch_name VARCHAR(255);
       ALTER TABLE egs_units ALTER COLUMN last_document_hash TYPE VARCHAR(128);
 
       CREATE INDEX IF NOT EXISTS idx_egs_units_merchant ON egs_units(merchant_id);
@@ -184,6 +187,7 @@ export async function initializeDatabaseSchema(): Promise<void> {
       ALTER TABLE merchant_tokens ADD COLUMN IF NOT EXISTS vat_number VARCHAR(15);
       ALTER TABLE merchant_tokens ADD COLUMN IF NOT EXISTS crn VARCHAR(32);
       ALTER TABLE merchant_tokens ADD COLUMN IF NOT EXISTS city VARCHAR(100);
+      ALTER TABLE merchant_tokens ADD COLUMN IF NOT EXISTS cod_fulfillment_statuses JSONB DEFAULT '["completed", "delivered"]'::jsonb;
 
       CREATE INDEX IF NOT EXISTS idx_merchant_tokens_merchant ON merchant_tokens(merchant_id);
 

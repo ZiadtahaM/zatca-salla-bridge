@@ -402,19 +402,38 @@ export async function processSallaWebhookPayload(
     const paymentMethod = orderData.payment_method?.toLowerCase() || '';
     const statusSlug = orderData.status?.slug?.toLowerCase() || '';
     const isDeferredPaymentMethod = ['cod', 'cash_on_delivery', 'bank', 'bank_transfer'].includes(paymentMethod);
-    const isFinalizedStatus = ['completed', 'delivered'].includes(statusSlug);
 
-    if (isDeferredPaymentMethod && !isFinalizedStatus) {
-      return {
-        statusCode: 200,
-        body: {
-          status: 'deferred_payment_hold',
-          order_id: orderId,
-          payment_method: orderData.payment_method,
-          order_status: orderData.status?.slug,
-          reason: 'COD and Bank Transfer orders are deferred until status reaches completed or delivered'
+    if (isDeferredPaymentMethod) {
+      let allowedFulfillmentSlugs = ['completed', 'delivered'];
+      try {
+        const merchantSettingsRes = await client.query(
+          `SELECT cod_fulfillment_statuses FROM merchant_tokens WHERE merchant_id = $1`,
+          [merchantId]
+        );
+        if (merchantSettingsRes.rows.length > 0 && merchantSettingsRes.rows[0].cod_fulfillment_statuses) {
+          const customSlugs = merchantSettingsRes.rows[0].cod_fulfillment_statuses;
+          if (Array.isArray(customSlugs) && customSlugs.length > 0) {
+            allowedFulfillmentSlugs = customSlugs.map((s: string) => String(s).toLowerCase().trim());
+          }
         }
-      };
+      } catch {
+        // Fallback to standard slugs if table column is pending migration
+      }
+
+      const isFinalizedStatus = allowedFulfillmentSlugs.includes(statusSlug);
+
+      if (!isFinalizedStatus) {
+        return {
+          statusCode: 200,
+          body: {
+            status: 'deferred_payment_hold',
+            order_id: orderId,
+            payment_method: orderData.payment_method,
+            order_status: orderData.status?.slug,
+            reason: `COD and Bank Transfer orders are deferred until status reaches one of: ${allowedFulfillmentSlugs.join(', ')}`
+          }
+        };
+      }
     }
 
     if (isB2bCustomer(orderData.customer?.tax_number)) {

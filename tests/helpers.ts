@@ -352,7 +352,10 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         csid_secret,
         current_icv,
         last_document_hash,
-        expires_at
+        expires_at,
+        crn_param,
+        vat_param,
+        branch_name_param
       ] = params;
 
       if (!String(private_key_pem).startsWith('v1:') || !String(csid_secret).startsWith('v1:')) {
@@ -374,6 +377,9 @@ export function attachStatefulRelationalTestDb(pool: any): void {
           csid_secret,
           expires_at,
           csid_environment,
+          crn: crn_param || unit.crn,
+          vat_number: vat_param || unit.vat_number,
+          branch_name: branch_name_param || unit.branch_name,
           updated_at: new Date()
         });
       } else {
@@ -397,6 +403,9 @@ export function attachStatefulRelationalTestDb(pool: any): void {
           last_document_hash,
           expires_at,
           is_active: true,
+          crn: crn_param || null,
+          vat_number: vat_param || null,
+          branch_name: branch_name_param || null,
           created_at: new Date(),
           updated_at: new Date()
         };
@@ -405,8 +414,16 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       return { rows: [{ id: unit.id }], rowCount: 1 };
     }
 
-    if (normalized.includes('FROM egs_units') && normalized.includes('WHERE id = $1')) {
-      const rows = egsUnits.filter((u) => u.id === params[0]);
+    if (normalized.includes('FROM egs_units') && (normalized.includes('WHERE id = $1') || normalized.includes('WHERE e.id = $1'))) {
+      const rows = egsUnits.filter((u) => u.id === params[0]).map((u) => {
+        const m = merchantTokens.find((t) => t.merchant_id === u.merchant_id);
+        return {
+          ...u,
+          seller_crn: u.crn || m?.crn || '1010010000',
+          seller_vat: u.vat_number || m?.vat_number || '300075588700003',
+          seller_name_arabic: u.branch_name || m?.store_name || 'شركة رواء للملابس الفاخرة'
+        };
+      });
       return { rows, rowCount: rows.length };
     }
 

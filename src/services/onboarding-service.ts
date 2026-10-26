@@ -12,6 +12,8 @@ export interface OnboardMerchantRequest {
   terminalId?: string;
   storeName: string;
   vatNumber: string;
+  crn?: string;
+  branchName?: string;
   otp: string;
   isProduction?: boolean;
   environment?: ZatcaEnvironment;
@@ -169,8 +171,9 @@ export async function onboardEgsUnit(
         merchant_id, branch_id, salla_branch_id, terminal_id, egs_uuid, custom_id, model,
         csid_environment, certificate, certificate_hash,
         public_key_bytes, ca_signature_bytes, private_key_pem, csid_secret,
-        current_icv, last_document_hash, expires_at, is_active
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, TRUE)
+        current_icv, last_document_hash, expires_at, is_active,
+        crn, vat_number, branch_name
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, TRUE, $18, $19, $20)
       ON CONFLICT (merchant_id, branch_id, custom_id) 
       DO UPDATE SET 
         salla_branch_id = EXCLUDED.salla_branch_id,
@@ -183,6 +186,9 @@ export async function onboardEgsUnit(
         csid_secret = EXCLUDED.csid_secret,
         expires_at = EXCLUDED.expires_at,
         csid_environment = EXCLUDED.csid_environment,
+        crn = COALESCE(EXCLUDED.crn, egs_units.crn),
+        vat_number = COALESCE(EXCLUDED.vat_number, egs_units.vat_number),
+        branch_name = COALESCE(EXCLUDED.branch_name, egs_units.branch_name),
         updated_at = NOW()
       RETURNING id`,
       [
@@ -202,7 +208,10 @@ export async function onboardEgsUnit(
         encryptedCsidSecret,
         0,
         initialPih,
-        expiresAt
+        expiresAt,
+        req.crn || null,
+        req.vatNumber || null,
+        req.branchName || req.storeName || null
       ]
     );
 

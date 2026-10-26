@@ -2,6 +2,7 @@ process.env.NODE_ENV = 'test';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { buildServer } from '../src/server.js';
 import { pool, initializeDatabaseSchema } from '../src/storage/db.js';
@@ -14,9 +15,9 @@ import {
   verifyReceiptToken
 } from '../src/crypto/auth-session.js';
 import { dispatchMerchantAlert } from '../src/services/alert-dispatcher.js';
-import { processPartialCreditNote } from '../src/services/invoice-generator.js';
+import { processPartialCreditNote, processSallaOrderIntoZatcaInvoice } from '../src/services/invoice-generator.js';
 import { extractQrFromClearedXml } from '../src/services/fatoora-dispatcher.js';
-import { drainWebhookQueue } from '../src/routes/salla-webhook.js';
+import { drainWebhookQueue, processSallaWebhookPayload } from '../src/routes/salla-webhook.js';
 import { generateValidSecp256k1TestCert } from './helpers.js';
 import { encryptVaultSecret } from '../src/crypto/vault.js';
 import { FastifyInstance } from 'fastify';
@@ -434,6 +435,217 @@ test('11. Post-reboot webhook_queue draining processes pending orders into signe
     // 4. Verify invoice was generated in database
     const invoiceCheck = await client.query(`SELECT id, uuid, icv, status FROM invoices WHERE order_id = $1`, [testOrderId]);
     assert.ok(invoiceCheck.rows.length > 0, 'Invoice must exist in database after queue drain');
+  } finally {
+    client.release();
+  }
+});
+
+test('12. Dynamic Seller Identity: Seller CRN, VAT and Store Name resolve dynamically from database and overrides', async () => {
+  const client = await pool.connect();
+  const testMerchantId = 'store_dynamic_seller_' + Date.now();
+  const testOrderId = (900000 + Math.floor(Math.random() * 100000)).toString();
+  const certDir = join(process.cwd(), '.zatca-test-keys-dynamic-seller');
+  const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+  const encKey = encryptVaultSecret(privateKeyPem);
+  const encSec = encryptVaultSecret('secret_dyn_123');
+
+  try {
+    // 1. Seed merchant_tokens with custom CRN, VAT, and store name
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
+      ) VALUES (
+        $1, 'مؤسسة التجارة الرقمية الحديثة', '310123456700003', '1010887766', $2, $3, NOW() + INTERVAL '30 days'
+      ) ON CONFLICT (merchant_id) DO UPDATE SET store_name = EXCLUDED.store_name, vat_number = EXCLUDED.vat_number, crn = EXCLUDED.crn`,
+      [testMerchantId, encryptVaultSecret('mock_token'), encryptVaultSecret('mock_refresh')]
+    );
+
+    // 2. Seed active subscription
+    await client.query(
+      `INSERT INTO merchant_subscriptions (merchant_id, plan_name, status)
+       VALUES ($1, 'standard', 'active')
+       ON CONFLICT (merchant_id) DO UPDATE SET status = 'active'`,
+      [testMerchantId]
+    );
+
+    // 3. Seed egs_unit for this merchant
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        $1, 'branch_east', 'egs_dyn_01', $2, $3,
+        $4, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 1, 'NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODU4ZjgyYTgwMjdhMDY1ZDE4MGNkNGI3Nzg4MzBkNWU1NTc1OWQ2ODU5Nw==',
+        '\\x00'::bytea, '\\x00'::bytea, 'dummy_hash', $5, 'SallaBridge-Dyn'
+      ) RETURNING id`,
+      [testMerchantId, encKey, certPem, encSec, randomUUID()]
+    );
+    const dynEgsUnitId = egsRes.rows[0].id;
+
+    // 4. Build sample order
+    const sampleOrder: any = {
+      id: testOrderId,
+      reference_id: testOrderId,
+      status: { id: 1, name: 'مكتمل', slug: 'completed' },
+      payment_method: 'credit_card',
+      currency: 'SAR',
+      customer: {
+        id: 'cust_dyn_1',
+        first_name: 'فيصل',
+        last_name: 'الغامدي',
+        mobile: '0555555555'
+      },
+      amounts: {
+        sub_total: { amount: 200.0, currency: 'SAR' },
+        tax: { amount: { amount: 30.0, currency: 'SAR' }, percent: 15 },
+        total: { amount: 230.0, currency: 'SAR' }
+      },
+      items: [
+        {
+          id: 'item_dyn_1',
+          name: 'طقم فاخر',
+          quantity: 1,
+          price: { amount: 200.0, currency: 'SAR' },
+          total: { amount: 230.0, currency: 'SAR' }
+        }
+      ]
+    };
+
+    // 5. Generate invoice and assert dynamic fields in signed XML
+    const result = await processSallaOrderIntoZatcaInvoice(
+      client,
+      dynEgsUnitId,
+      sampleOrder,
+      `salla:${testMerchantId}:order.created:${testOrderId}:${Date.now()}`
+    );
+
+    assert.ok(result.signedXml.includes('<cbc:ID schemeID="CRN">1010887766</cbc:ID>'), 'Must contain merchant CRN from database');
+    assert.ok(result.signedXml.includes('<cbc:CompanyID>310123456700003</cbc:CompanyID>'), 'Must contain merchant VAT from database');
+    assert.ok(result.signedXml.includes('مؤسسة التجارة الرقمية الحديثة'), 'Must contain merchant store name from database');
+
+    // 6. Test with explicit overrides
+    const orderIdOverride = `${testOrderId}_ovr`;
+    sampleOrder.id = orderIdOverride;
+    sampleOrder.reference_id = orderIdOverride;
+    const resultWithOverride = await processSallaOrderIntoZatcaInvoice(
+      client,
+      dynEgsUnitId,
+      sampleOrder,
+      `salla:${testMerchantId}:order.created:${orderIdOverride}:${Date.now()}`,
+      {
+        sellerCrn: '1010999000',
+        sellerVat: '300099988800003',
+        sellerNameArabic: 'شركة الفرع المخصص المحدودة'
+      }
+    );
+
+    assert.ok(resultWithOverride.signedXml.includes('<cbc:ID schemeID="CRN">1010999000</cbc:ID>'), 'Must contain override CRN');
+    assert.ok(resultWithOverride.signedXml.includes('<cbc:CompanyID>300099988800003</cbc:CompanyID>'), 'Must contain override VAT');
+    assert.ok(resultWithOverride.signedXml.includes('شركة الفرع المخصص المحدودة'), 'Must contain override store name');
+  } finally {
+    client.release();
+  }
+});
+
+test('13. Configurable COD Fulfillment Slugs: Custom merchant slugs bypass deferred hold on delivery', async () => {
+  const client = await pool.connect();
+  const testMerchantId = 'store_cod_slugs_' + Date.now();
+  const testOrderId1 = (920000 + Math.floor(Math.random() * 10000)).toString();
+  const testOrderId2 = (930000 + Math.floor(Math.random() * 10000)).toString();
+  const certDir = join(process.cwd(), '.zatca-test-keys-cod-slugs');
+  const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+  const encKey = encryptVaultSecret(privateKeyPem);
+  const encSec = encryptVaultSecret('secret_cod_123');
+
+  try {
+    // 1. Seed merchant with custom cod_fulfillment_statuses = ["shipped", "dispatched", "delivered"]
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at, cod_fulfillment_statuses
+      ) VALUES (
+        $1, 'متجر التوصيل السريع', '300075588700003', '1010123456', $2, $3, NOW() + INTERVAL '30 days',
+        '["shipped", "dispatched", "delivered"]'::jsonb
+      ) ON CONFLICT (merchant_id) DO UPDATE SET cod_fulfillment_statuses = EXCLUDED.cod_fulfillment_statuses`,
+      [testMerchantId, encryptVaultSecret('mock_token'), encryptVaultSecret('mock_refresh')]
+    );
+
+    await client.query(
+      `INSERT INTO merchant_subscriptions (merchant_id, plan_name, status)
+       VALUES ($1, 'standard', 'active')
+       ON CONFLICT (merchant_id) DO UPDATE SET status = 'active'`,
+      [testMerchantId]
+    );
+
+    await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        $1, 'main', 'egs_cod_01', $2, $3,
+        $4, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 1, 'NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODU4ZjgyYTgwMjdhMDY1ZDE4MGNkNGI3Nzg4MzBkNWU1NTc1OWQ2ODU5Nw==',
+        '\\x00'::bytea, '\\x00'::bytea, 'dummy_hash', $5, 'SallaBridge-COD'
+      )`,
+      [testMerchantId, encKey, certPem, encSec, randomUUID()]
+    );
+
+    // 2. Webhook payload with payment_method: 'cod' and custom status: 'dispatched'
+    const dispatchedPayload = {
+      event: 'order.updated',
+      merchant: testMerchantId,
+      created_at: new Date().toISOString(),
+      data: {
+        id: testOrderId1,
+        reference_id: testOrderId1,
+        status: { id: 5, name: 'تم الإرسال', slug: 'dispatched' },
+        payment_method: 'cod',
+        currency: 'SAR',
+        customer: {
+          id: 'cust_cod_1',
+          first_name: 'نايف',
+          last_name: 'الدوسري',
+          mobile: '0511111111'
+        },
+        amounts: {
+          sub_total: { amount: 100.0, currency: 'SAR' },
+          tax: { amount: { amount: 15.0, currency: 'SAR' }, percent: 15 },
+          total: { amount: 115.0, currency: 'SAR' }
+        },
+        items: [
+          {
+            id: 'item_cod_1',
+            name: 'منتج دفع عند الاستلام',
+            quantity: 1,
+            price: { amount: 100.0, currency: 'SAR' },
+            total: { amount: 115.0, currency: 'SAR' }
+          }
+        ]
+      }
+    };
+
+    const resDispatched = await processSallaWebhookPayload(client, dispatchedPayload as any);
+    assert.equal(resDispatched.statusCode, 200);
+    assert.equal(resDispatched.body.status, 'signed_and_recorded', 'Must clear deferred hold and generate invoice for dispatched slug');
+    assert.ok(resDispatched.body.invoice_uuid, 'Must return generated invoice UUID');
+
+    // 3. Webhook payload with unapproved status slug (e.g. 'under_review') must remain held
+    const underReviewPayload = {
+      event: 'order.created',
+      merchant: testMerchantId,
+      created_at: new Date().toISOString(),
+      data: {
+        ...dispatchedPayload.data,
+        id: testOrderId2,
+        reference_id: testOrderId2,
+        status: { id: 2, name: 'قيد المراجعة', slug: 'under_review' }
+      }
+    };
+
+    const resUnderReview = await processSallaWebhookPayload(client, underReviewPayload as any);
+    assert.equal(resUnderReview.statusCode, 200);
+    assert.equal(resUnderReview.body.status, 'deferred_payment_hold', 'Must hold unapproved COD status slug');
+    assert.ok(resUnderReview.body.reason.includes('dispatched'), 'Reason must list allowed merchant slugs');
   } finally {
     client.release();
   }

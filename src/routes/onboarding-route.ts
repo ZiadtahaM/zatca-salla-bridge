@@ -12,6 +12,8 @@ export const OnboardRequestSchema = z.object({
   terminalId: z.string().optional(),
   storeName: z.string().min(1),
   vatNumber: z.string().regex(/^3\d{13}3$/, 'Saudi VAT number must be 15 digits starting and ending with 3'),
+  crn: z.string().regex(/^\d{10}$/, 'CRN must be exactly 10 digits').optional(),
+  branchName: z.string().optional(),
   otp: z.string().length(6, 'Fatoora OTP must be exactly 6 digits'),
   isProduction: z.boolean().optional().default(false),
   environment: z.enum(['sandbox', 'simulation', 'production']).optional(),

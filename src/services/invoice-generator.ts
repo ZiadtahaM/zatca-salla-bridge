@@ -801,9 +801,9 @@ export async function processSallaOrderIntoZatcaInvoice(
       const egsRes = await client.query(
         `SELECT e.id, e.merchant_id, e.branch_id, e.current_icv, e.last_document_hash, 
                 e.private_key_pem, e.csid_secret, e.certificate, e.expires_at, e.csid_environment,
-                COALESCE(e.crn, m.crn, '1010010000') AS seller_crn,
-                COALESCE(e.vat_number, m.vat_number, '300075588700003') AS seller_vat,
-                COALESCE(e.branch_name, m.store_name, 'شركة رواء للملابس الفاخرة') AS seller_name_arabic
+                COALESCE(e.crn, m.crn) AS seller_crn,
+                COALESCE(e.vat_number, m.vat_number) AS seller_vat,
+                COALESCE(e.branch_name, m.store_name) AS seller_name_arabic
          FROM egs_units e
          LEFT JOIN merchant_tokens m ON e.merchant_id = m.merchant_id
          WHERE e.id = $1 FOR UPDATE OF e`,
@@ -823,6 +823,16 @@ export async function processSallaOrderIntoZatcaInvoice(
       const resolvedSellerCrn = overrides?.sellerCrn || egs.seller_crn;
       const resolvedSellerVat = overrides?.sellerVat || egs.seller_vat;
       const resolvedSellerName = overrides?.sellerNameArabic || egs.seller_name_arabic;
+
+      if (!resolvedSellerVat) {
+        throw new Error(`MISSING_SELLER_VAT: EGS Unit ${egsUnitId} has no VAT number configured in egs_units or merchant_tokens`);
+      }
+      if (!resolvedSellerCrn) {
+        throw new Error(`MISSING_SELLER_CRN: EGS Unit ${egsUnitId} has no CRN configured in egs_units or merchant_tokens`);
+      }
+      if (!resolvedSellerName) {
+        throw new Error(`MISSING_SELLER_NAME: EGS Unit ${egsUnitId} has no seller name configured in egs_units or merchant_tokens`);
+      }
 
       const maxIcvRes = await client.query(
         `SELECT COALESCE(MAX(icv), 0) AS max_icv FROM invoices WHERE egs_unit_id = $1`,
@@ -964,9 +974,9 @@ export async function processSallaRefundIntoZatcaCreditNote(
     const egsRes = await client.query(
       `SELECT e.id, e.merchant_id, e.current_icv, e.last_document_hash, 
               e.private_key_pem, e.csid_secret, e.certificate, e.expires_at, e.csid_environment,
-              COALESCE(e.crn, m.crn, '1010010000') AS seller_crn,
-              COALESCE(e.vat_number, m.vat_number, '300075588700003') AS seller_vat,
-              COALESCE(e.branch_name, m.store_name, 'شركة رواء للملابس الفاخرة') AS seller_name_arabic
+              COALESCE(e.crn, m.crn) AS seller_crn,
+              COALESCE(e.vat_number, m.vat_number) AS seller_vat,
+              COALESCE(e.branch_name, m.store_name) AS seller_name_arabic
        FROM egs_units e
        LEFT JOIN merchant_tokens m ON e.merchant_id = m.merchant_id
        WHERE e.id = $1 FOR UPDATE OF e`,
@@ -982,6 +992,16 @@ export async function processSallaRefundIntoZatcaCreditNote(
     const resolvedSellerCrn = overrides?.sellerCrn || egs.seller_crn;
     const resolvedSellerVat = overrides?.sellerVat || egs.seller_vat;
     const resolvedSellerName = overrides?.sellerNameArabic || egs.seller_name_arabic;
+
+    if (!resolvedSellerVat) {
+      throw new Error(`MISSING_SELLER_VAT: EGS Unit ${egsUnitId} has no VAT number configured in egs_units or merchant_tokens`);
+    }
+    if (!resolvedSellerCrn) {
+      throw new Error(`MISSING_SELLER_CRN: EGS Unit ${egsUnitId} has no CRN configured in egs_units or merchant_tokens`);
+    }
+    if (!resolvedSellerName) {
+      throw new Error(`MISSING_SELLER_NAME: EGS Unit ${egsUnitId} has no seller name configured in egs_units or merchant_tokens`);
+    }
 
     const maxIcvRes = await client.query(
       `SELECT COALESCE(MAX(icv), 0) AS max_icv FROM invoices WHERE egs_unit_id = $1`,
@@ -1169,9 +1189,9 @@ export async function processPartialCreditNote(
     const egsRes = await client.query(
       `SELECT e.id, e.merchant_id, e.current_icv, e.last_document_hash, 
               e.private_key_pem, e.csid_secret, e.certificate, e.expires_at, e.csid_environment,
-              COALESCE(e.crn, m.crn, '1010010000') AS seller_crn,
-              COALESCE(e.vat_number, m.vat_number, '300075588700003') AS seller_vat,
-              COALESCE(e.branch_name, m.store_name, 'شركة رواء للملابس الفاخرة') AS seller_name_arabic
+              COALESCE(e.crn, m.crn) AS seller_crn,
+              COALESCE(e.vat_number, m.vat_number) AS seller_vat,
+              COALESCE(e.branch_name, m.store_name) AS seller_name_arabic
        FROM egs_units e
        LEFT JOIN merchant_tokens m ON e.merchant_id = m.merchant_id
        WHERE e.id = $1 FOR UPDATE OF e`,
@@ -1187,6 +1207,16 @@ export async function processPartialCreditNote(
     const resolvedSellerCrn = options.sellerCrn || egs.seller_crn;
     const resolvedSellerVat = options.sellerVat || egs.seller_vat;
     const resolvedSellerName = options.sellerNameArabic || egs.seller_name_arabic;
+
+    if (!resolvedSellerVat) {
+      throw new Error(`MISSING_SELLER_VAT: EGS Unit ${egsUnitId} has no VAT number configured in egs_units or merchant_tokens`);
+    }
+    if (!resolvedSellerCrn) {
+      throw new Error(`MISSING_SELLER_CRN: EGS Unit ${egsUnitId} has no CRN configured in egs_units or merchant_tokens`);
+    }
+    if (!resolvedSellerName) {
+      throw new Error(`MISSING_SELLER_NAME: EGS Unit ${egsUnitId} has no seller name configured in egs_units or merchant_tokens`);
+    }
 
     const maxIcvRes = await client.query(
       `SELECT COALESCE(MAX(icv), 0) AS max_icv FROM invoices WHERE egs_unit_id = $1`,

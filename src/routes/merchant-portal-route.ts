@@ -420,10 +420,10 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
 };
 
 async function seedDemoStoreIfNeeded(client: any): Promise<void> {
-  const check = await client.query(
-    `SELECT merchant_id FROM merchant_tokens WHERE merchant_id = 'salla_demo_store'`
+  const checkUnit = await client.query(
+    `SELECT id FROM egs_units WHERE merchant_id = 'salla_demo_store' AND is_active = TRUE LIMIT 1`
   );
-  if (check.rows.length > 0) return;
+  if (checkUnit.rows.length > 0) return;
 
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 14 * 24 * 3600 * 1000);
@@ -507,8 +507,9 @@ async function seedDemoStoreIfNeeded(client: any): Promise<void> {
       merchant_id, branch_id, salla_branch_id, terminal_id, egs_uuid, custom_id, model,
       csid_environment, certificate, certificate_hash,
       public_key_bytes, ca_signature_bytes, private_key_pem, csid_secret,
-      current_icv, last_document_hash, expires_at, is_active
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, TRUE)
+      current_icv, last_document_hash, expires_at, is_active,
+      crn, vat_number, branch_name
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, TRUE, $18, $19, $20)
     RETURNING id`,
     [
       'salla_demo_store',
@@ -527,7 +528,10 @@ async function seedDemoStoreIfNeeded(client: any): Promise<void> {
       encryptVaultSecret('demo_csid_secret_123'),
       3,
       initPih,
-      subExpiresAt.toISOString()
+      subExpiresAt.toISOString(),
+      '1010998877',
+      '310123456700003',
+      'فرع لمسات نجد الرئيسي'
     ]
   );
 

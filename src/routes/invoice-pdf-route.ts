@@ -18,14 +18,16 @@ function extractSellerDetailsFromXml(xml: string): { sellerNameArabic: string; s
   const vatMatch = supplierBlock.match(/<cbc:CompanyID>([^<]+)<\/cbc:CompanyID>/);
 
   return {
-    sellerNameArabic: nameMatch?.[1]?.trim() || 'شركة رواء للملابس الفاخرة',
-    sellerVat: vatMatch?.[1]?.trim() || '300075588700003'
+    sellerNameArabic: nameMatch?.[1]?.trim() || '',
+    sellerVat: vatMatch?.[1]?.trim() || ''
   };
 }
 
 function mapInvoiceRowToPdfInput(row: any): InvoicePdfInput {
   const xmlContent: string = row.cleared_xml || row.signed_xml;
-  const { sellerNameArabic, sellerVat } = extractSellerDetailsFromXml(xmlContent);
+  const { sellerNameArabic: xmlName, sellerVat: xmlVat } = extractSellerDetailsFromXml(xmlContent);
+  const sellerNameArabic = xmlName || row.seller_name_arabic || '';
+  const sellerVat = xmlVat || row.seller_vat || '';
 
   const issueTimestamp =
     row.issue_timestamp instanceof Date
@@ -71,9 +73,12 @@ async function fetchInvoiceById(id: string): Promise<any | null> {
     `SELECT i.id, i.egs_unit_id, i.order_id, i.invoice_type, i.uuid, i.icv,
             i.pih, i.invoice_hash, i.qr_code_payload, i.signed_xml, i.cleared_xml,
             i.status, i.supply_date, i.issue_timestamp, i.subtotal, i.tax_total,
-            i.grand_total, i.currency, e.merchant_id, e.branch_id
+            i.grand_total, i.currency, e.merchant_id, e.branch_id,
+            COALESCE(e.branch_name, m.store_name) AS seller_name_arabic,
+            COALESCE(e.vat_number, m.vat_number) AS seller_vat
      FROM invoices i
      LEFT JOIN egs_units e ON e.id = i.egs_unit_id
+     LEFT JOIN merchant_tokens m ON m.merchant_id = e.merchant_id
      WHERE i.id = $1`,
     [id]
   );

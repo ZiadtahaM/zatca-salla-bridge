@@ -35,6 +35,18 @@ before(async () => {
   try {
     const encKey = encryptVaultSecret(privateKeyPem);
     const encSec = encryptVaultSecret('secret_123');
+
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
+      ) VALUES (
+        'salla_demo_store', 'متجر سلة التجريبي', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
+      ) ON CONFLICT (merchant_id) DO UPDATE SET 
+        store_name = EXCLUDED.store_name,
+        vat_number = EXCLUDED.vat_number,
+        crn = EXCLUDED.crn`,
+      [encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
     const egsRes = await client.query(
       `INSERT INTO egs_units (
         merchant_id, branch_id, custom_id, private_key_pem, certificate,
@@ -646,6 +658,85 @@ test('13. Configurable COD Fulfillment Slugs: Custom merchant slugs bypass defer
     assert.equal(resUnderReview.statusCode, 200);
     assert.equal(resUnderReview.body.status, 'deferred_payment_hold', 'Must hold unapproved COD status slug');
     assert.ok(resUnderReview.body.reason.includes('dispatched'), 'Reason must list allowed merchant slugs');
+  } finally {
+    client.release();
+  }
+});
+
+test('14. Dynamic Seller Identity & Missing-Data Invariant: Zero-mock isolation and fatal rejection of missing tax attributes', async () => {
+  const client = await pool.connect();
+  const testMerchantId = 'store_identity_' + Date.now();
+  const certDir = join(process.cwd(), '.zatca-test-keys-identity-dynamic');
+  const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+  const encKey = encryptVaultSecret(privateKeyPem);
+  const encSec = encryptVaultSecret('secret_ident_123');
+
+  try {
+    // 1. Create an EGS unit for a merchant with NO crn or vat_number in egs_units and NO record in merchant_tokens
+    const incompleteEgsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        $1, 'bare_branch', 'egs_incomplete_01', $2, $3,
+        $4, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 1, 'NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODU4ZjgyYTgwMjdhMDY1ZDE4MGNkNGI3Nzg4MzBkNWU1NTc1OWQ2ODU5Nw==',
+        '\\x00'::bytea, '\\x00'::bytea, 'dummy_hash', $5, 'SallaBridge-Dynamic'
+      ) RETURNING id`,
+      [testMerchantId, encKey, certPem, encSec, randomUUID()]
+    );
+    const incompleteEgsId = incompleteEgsRes.rows[0].id;
+
+    // 2. Standalone API /api/v1/sign must reject with HTTP 422 MISSING_SELLER_IDENTITY
+    const signResMissing = await app.inject({
+      method: 'POST',
+      url: '/api/v1/sign',
+      payload: {
+        merchantId: testMerchantId,
+        branchId: 'bare_branch',
+        items: [{ name: 'Test Product', quantity: 1, price: 100.0, taxPercent: 15 }]
+      }
+    });
+    assert.equal(signResMissing.statusCode, 422, 'Must reject with 422 when seller identity is missing');
+    const missingBody = JSON.parse(signResMissing.body);
+    assert.equal(missingBody.error, 'MISSING_SELLER_IDENTITY');
+    assert.ok(missingBody.message.includes('BR-KSA-F-13'), 'Error message must cite ZATCA rule BR-KSA-F-13');
+
+    // 3. Populate merchant_tokens with parent CRN and VAT number, and egs_units with distinct branch CRN
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
+      ) VALUES (
+        $1, 'شركة الأفق الرقمية المحدودة', '310953887700003', '1010777777', $2, $3, NOW() + INTERVAL '30 days'
+      )`,
+      [testMerchantId, encryptVaultSecret('token_dynamic'), encryptVaultSecret('refresh_dynamic')]
+    );
+
+    // EGS unit has distinct branch CRN and branch name
+    await client.query(
+      `UPDATE egs_units
+       SET crn = '1010888888', branch_name = 'فرع العليا - شركة الأفق'
+       WHERE id = $1`,
+      [incompleteEgsId]
+    );
+
+    // 4. Standalone API /api/v1/sign must succeed and use branch CRN over parent CRN
+    const signResSuccess = await app.inject({
+      method: 'POST',
+      url: '/api/v1/sign',
+      payload: {
+        merchantId: testMerchantId,
+        branchId: 'bare_branch',
+        items: [{ name: 'حاسب محمول', quantity: 1, price: 4000.0, taxPercent: 15 }]
+      }
+    });
+    assert.equal(signResSuccess.statusCode, 200, 'Must succeed when seller identity is configured');
+    const successBody = JSON.parse(signResSuccess.body);
+    assert.ok(successBody.signedXml.includes('<cbc:ID schemeID="CRN">1010888888</cbc:ID>'), 'Must contain branch CRN');
+    assert.ok(successBody.signedXml.includes('<cbc:CompanyID>310953887700003</cbc:CompanyID>'), 'Must contain parent VAT');
+    assert.ok(successBody.signedXml.includes('فرع العليا - شركة الأفق'), 'Must contain branch name');
+    assert.ok(!successBody.signedXml.includes('1010010000'), 'Must not contain old fallback CRN');
+    assert.ok(!successBody.signedXml.includes('شركة رواء للملابس الفاخرة'), 'Must not contain old fallback name');
   } finally {
     client.release();
   }

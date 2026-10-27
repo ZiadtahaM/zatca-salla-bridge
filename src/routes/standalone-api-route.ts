@@ -56,8 +56,20 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
     const client = await pool.connect();
     try {
       const egsQuery = branchId
-        ? `SELECT * FROM egs_units WHERE merchant_id = $1 AND (branch_id = $2 OR custom_id = $2) AND is_active = TRUE LIMIT 1`
-        : `SELECT * FROM egs_units WHERE merchant_id = $1 AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`;
+        ? `SELECT e.*, 
+                  COALESCE(e.crn, m.crn) AS seller_crn,
+                  COALESCE(e.vat_number, m.vat_number) AS seller_vat,
+                  COALESCE(e.branch_name, m.store_name) AS seller_name_arabic
+           FROM egs_units e
+           LEFT JOIN merchant_tokens m ON e.merchant_id = m.merchant_id
+           WHERE e.merchant_id = $1 AND (e.branch_id = $2 OR e.custom_id = $2) AND e.is_active = TRUE LIMIT 1`
+        : `SELECT e.*, 
+                  COALESCE(e.crn, m.crn) AS seller_crn,
+                  COALESCE(e.vat_number, m.vat_number) AS seller_vat,
+                  COALESCE(e.branch_name, m.store_name) AS seller_name_arabic
+           FROM egs_units e
+           LEFT JOIN merchant_tokens m ON e.merchant_id = m.merchant_id
+           WHERE e.merchant_id = $1 AND e.is_active = TRUE ORDER BY e.created_at ASC LIMIT 1`;
       const egsParams = branchId ? [merchantId, branchId] : [merchantId];
       const egsRes = await client.query(egsQuery, egsParams);
 
@@ -69,6 +81,23 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
       }
 
       const egs = egsRes.rows[0];
+      const sellerCrn = egs.seller_crn;
+      const sellerVat = egs.seller_vat;
+      const sellerNameArabic = egs.seller_name_arabic;
+
+      if (!sellerVat || !sellerCrn || !sellerNameArabic) {
+        return reply.status(422).send({
+          error: 'MISSING_SELLER_IDENTITY',
+          message: `EGS unit or merchant profile is missing required ZATCA seller identity (VAT: ${sellerVat ? 'present' : 'missing'}, CRN: ${sellerCrn ? 'present' : 'missing'}, Name: ${sellerNameArabic ? 'present' : 'missing'}). In accordance with BR-KSA-F-13, invoices cannot be generated without complete identity.`
+        });
+      }
+
+      if (!isB2C && !customer?.taxNumber) {
+        return reply.status(422).send({
+          error: 'MISSING_BUYER_TAX_NUMBER',
+          message: 'B2B standard tax invoice requires a valid customer taxNumber (VAT number).'
+        });
+      }
       const now = new Date();
       const issueDate = parsed.data.issueDate || now.toISOString().split('T')[0];
       const issueTime = parsed.data.issueTime || `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
@@ -106,7 +135,7 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
         customer: {
           id: 1,
           first_name: customer?.name || 'Customer',
-          tax_number: customer?.taxNumber || (isB2C ? null : '300075588700003'),
+          tax_number: customer?.taxNumber || null,
           company_name: isB2C ? undefined : customer?.name
         },
         shipping: {
@@ -138,9 +167,9 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
         pih,
         issueDate,
         issueTime,
-        sellerNameArabic: 'شركة رواء للملابس الفاخرة',
-        sellerVat: egs.vat_number || '300075588700003',
-        sellerCrn: '1010010000',
+        sellerNameArabic,
+        sellerVat,
+        sellerCrn,
         isB2C
       });
 
@@ -149,8 +178,8 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
         rawXml,
         privateKeyPem: privateKey,
         certPem: egs.certificate,
-        sellerNameArabic: 'شركة رواء للملابس الفاخرة',
-        sellerVatNumber: egs.vat_number || '300075588700003',
+        sellerNameArabic,
+        sellerVatNumber: sellerVat,
         grandTotal: grandTotal.toFixed(2),
         vatTotal: taxTotal.toFixed(2),
         issueDateTimeIsoZ,
@@ -195,8 +224,20 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
       await client.query('BEGIN');
 
       const egsQuery = branchId
-        ? `SELECT * FROM egs_units WHERE merchant_id = $1 AND (branch_id = $2 OR custom_id = $2) AND is_active = TRUE FOR UPDATE LIMIT 1`
-        : `SELECT * FROM egs_units WHERE merchant_id = $1 AND is_active = TRUE ORDER BY created_at ASC FOR UPDATE LIMIT 1`;
+        ? `SELECT e.*, 
+                  COALESCE(e.crn, m.crn) AS seller_crn,
+                  COALESCE(e.vat_number, m.vat_number) AS seller_vat,
+                  COALESCE(e.branch_name, m.store_name) AS seller_name_arabic
+           FROM egs_units e
+           LEFT JOIN merchant_tokens m ON e.merchant_id = m.merchant_id
+           WHERE e.merchant_id = $1 AND (e.branch_id = $2 OR e.custom_id = $2) AND e.is_active = TRUE FOR UPDATE OF e LIMIT 1`
+        : `SELECT e.*, 
+                  COALESCE(e.crn, m.crn) AS seller_crn,
+                  COALESCE(e.vat_number, m.vat_number) AS seller_vat,
+                  COALESCE(e.branch_name, m.store_name) AS seller_name_arabic
+           FROM egs_units e
+           LEFT JOIN merchant_tokens m ON e.merchant_id = m.merchant_id
+           WHERE e.merchant_id = $1 AND e.is_active = TRUE ORDER BY e.created_at ASC FOR UPDATE OF e LIMIT 1`;
       const egsParams = branchId ? [merchantId, branchId] : [merchantId];
       const egsRes = await client.query(egsQuery, egsParams);
 
@@ -209,6 +250,25 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
       }
 
       const egs = egsRes.rows[0];
+      const sellerCrn = egs.seller_crn;
+      const sellerVat = egs.seller_vat;
+      const sellerNameArabic = egs.seller_name_arabic;
+
+      if (!sellerVat || !sellerCrn || !sellerNameArabic) {
+        await client.query('ROLLBACK');
+        return reply.status(422).send({
+          error: 'MISSING_SELLER_IDENTITY',
+          message: `EGS unit or merchant profile is missing required ZATCA seller identity (VAT: ${sellerVat ? 'present' : 'missing'}, CRN: ${sellerCrn ? 'present' : 'missing'}, Name: ${sellerNameArabic ? 'present' : 'missing'}). In accordance with BR-KSA-F-13, invoices cannot be generated without complete identity.`
+        });
+      }
+
+      if (!isB2C && !customer?.taxNumber) {
+        await client.query('ROLLBACK');
+        return reply.status(422).send({
+          error: 'MISSING_BUYER_TAX_NUMBER',
+          message: 'B2B standard tax invoice requires a valid customer taxNumber (VAT number).'
+        });
+      }
       const now = new Date();
       const issueDate = parsed.data.issueDate || now.toISOString().split('T')[0];
       const issueTime = parsed.data.issueTime || `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
@@ -246,7 +306,7 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
         customer: {
           id: 1,
           first_name: customer?.name || 'Customer',
-          tax_number: customer?.taxNumber || (isB2C ? null : '300075588700003'),
+          tax_number: customer?.taxNumber || null,
           company_name: isB2C ? undefined : customer?.name
         },
         shipping: {
@@ -278,9 +338,9 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
         pih,
         issueDate,
         issueTime,
-        sellerNameArabic: 'شركة رواء للملابس الفاخرة',
-        sellerVat: egs.vat_number || '300075588700003',
-        sellerCrn: '1010010000',
+        sellerNameArabic,
+        sellerVat,
+        sellerCrn,
         isB2C
       });
 
@@ -289,8 +349,8 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
         rawXml,
         privateKeyPem: privateKey,
         certPem: egs.certificate,
-        sellerNameArabic: 'شركة رواء للملابس الفاخرة',
-        sellerVatNumber: egs.vat_number || '300075588700003',
+        sellerNameArabic,
+        sellerVatNumber: sellerVat,
         grandTotal: grandTotal.toFixed(2),
         vatTotal: taxTotal.toFixed(2),
         issueDateTimeIsoZ,

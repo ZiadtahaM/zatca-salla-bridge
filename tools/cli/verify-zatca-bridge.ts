@@ -99,6 +99,7 @@ async function runLever(): Promise<void> {
           branchId,
           storeName: 'شركة رواء للملابس الفاخرة',
           vatNumber: '300075588700003',
+          crn: '1010010000',
           otp: '123456',
           isProduction: false
         }

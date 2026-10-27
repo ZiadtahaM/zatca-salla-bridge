@@ -419,9 +419,9 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         const m = merchantTokens.find((t) => t.merchant_id === u.merchant_id);
         return {
           ...u,
-          seller_crn: u.crn || m?.crn || '1010010000',
-          seller_vat: u.vat_number || m?.vat_number || '300075588700003',
-          seller_name_arabic: u.branch_name || m?.store_name || 'شركة رواء للملابس الفاخرة'
+          seller_crn: u.crn || m?.crn || null,
+          seller_vat: u.vat_number || m?.vat_number || null,
+          seller_name_arabic: u.branch_name || m?.store_name || null
         };
       });
       return { rows, rowCount: rows.length };
@@ -452,8 +452,35 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       return { rows, rowCount: rows.length };
     }
 
-    if (normalized.includes('FROM egs_units WHERE merchant_id = $1 AND is_active = TRUE')) {
-      const rows = egsUnits.filter((u) => u.merchant_id === params[0] && u.is_active).slice(0, 1);
+    if (normalized.includes('FROM egs_units') && (normalized.includes('(e.branch_id = $2 OR e.custom_id = $2)') || normalized.includes('(branch_id = $2 OR custom_id = $2)'))) {
+      const rows = egsUnits
+        .filter((u) => u.merchant_id === params[0] && (u.branch_id === params[1] || u.custom_id === params[1]) && u.is_active)
+        .map((u) => {
+          const m = merchantTokens.find((t) => t.merchant_id === u.merchant_id);
+          return {
+            ...u,
+            seller_crn: u.crn || m?.crn || null,
+            seller_vat: u.vat_number || m?.vat_number || null,
+            seller_name_arabic: u.branch_name || m?.store_name || null
+          };
+        })
+        .slice(0, 1);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('FROM egs_units') && (normalized.includes('e.merchant_id = $1 AND e.is_active = TRUE') || normalized.includes('merchant_id = $1 AND is_active = TRUE'))) {
+      const rows = egsUnits
+        .filter((u) => u.merchant_id === params[0] && u.is_active)
+        .map((u) => {
+          const m = merchantTokens.find((t) => t.merchant_id === u.merchant_id);
+          return {
+            ...u,
+            seller_crn: u.crn || m?.crn || null,
+            seller_vat: u.vat_number || m?.vat_number || null,
+            seller_name_arabic: u.branch_name || m?.store_name || null
+          };
+        })
+        .slice(0, 1);
       return { rows, rowCount: rows.length };
     }
 

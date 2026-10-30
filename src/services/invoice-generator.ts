@@ -1365,6 +1365,28 @@ export async function processSallaOrderIntoZatcaInvoice(
     await client.query('BEGIN');
 
     try {
+      if (idempotencyKey) {
+        const existingRes = await client.query(
+          `SELECT id, uuid, icv, pih, invoice_hash, qr_code_payload, signed_xml, invoice_type
+           FROM invoices 
+           WHERE idempotency_key = $1`,
+          [idempotencyKey]
+        );
+        if (existingRes.rows.length > 0) {
+          const row = existingRes.rows[0];
+          await client.query('ROLLBACK');
+          return {
+            invoiceId: row.id,
+            invoiceUuid: row.uuid,
+            icv: Number(row.icv),
+            pih: row.pih,
+            invoiceHash: row.invoice_hash,
+            qrCodeBase64: row.qr_code_payload,
+            signedXml: row.signed_xml,
+            isB2C: row.invoice_type === 'simplified_tax_invoice'
+          };
+        }
+      }
       const egsRes = await client.query(
         `SELECT e.id, e.merchant_id, e.branch_id, e.current_icv, e.last_document_hash, 
                 e.private_key_pem, e.csid_secret, e.certificate, e.expires_at, e.csid_environment,
@@ -1524,6 +1546,28 @@ export async function processSallaRefundIntoZatcaCreditNote(
     await client.query('BEGIN');
 
     try {
+      if (idempotencyKey) {
+        const existingRes = await client.query(
+          `SELECT id, uuid, icv, pih, invoice_hash, qr_code_payload, signed_xml, invoice_type
+           FROM invoices 
+           WHERE idempotency_key = $1`,
+          [idempotencyKey]
+        );
+        if (existingRes.rows.length > 0) {
+          const row = existingRes.rows[0];
+          await client.query('ROLLBACK');
+          return {
+            invoiceId: row.id,
+            invoiceUuid: row.uuid,
+            icv: Number(row.icv),
+            pih: row.pih,
+            invoiceHash: row.invoice_hash,
+            qrCodeBase64: row.qr_code_payload,
+            signedXml: row.signed_xml,
+            isB2C: row.invoice_type === 'simplified_tax_invoice'
+          };
+        }
+      }
     const origRes = await client.query(
       `SELECT id, uuid, icv, status 
        FROM invoices 
@@ -1709,6 +1753,28 @@ export async function processPartialCreditNote(
     await client.query('BEGIN');
 
     try {
+      if (options.idempotencyKey) {
+        const existingRes = await client.query(
+          `SELECT id, uuid, icv, pih, invoice_hash, qr_code_payload, signed_xml, invoice_type
+           FROM invoices 
+           WHERE idempotency_key = $1`,
+          [options.idempotencyKey]
+        );
+        if (existingRes.rows.length > 0) {
+          const row = existingRes.rows[0];
+          await client.query('ROLLBACK');
+          return {
+            invoiceId: row.id,
+            invoiceUuid: row.uuid,
+            icv: Number(row.icv),
+            pih: row.pih,
+            invoiceHash: row.invoice_hash,
+            qrCodeBase64: row.qr_code_payload,
+            signedXml: row.signed_xml,
+            isB2C: row.invoice_type === 'simplified_tax_invoice'
+          };
+        }
+      }
     let originalInvoice: any = null;
     if (options.originalInvoiceId) {
       const origRes = await client.query(

@@ -68,7 +68,13 @@ export class MockZatcaApiClient implements ZatcaApiClient {
     };
   }
 
-  async submitComplianceInvoice() {
+  async submitComplianceInvoice(
+    _signedXml?: string,
+    _invoiceHash?: string,
+    _uuid?: string,
+    _token?: string,
+    _secret?: string
+  ): Promise<boolean> {
     return true;
   }
 

@@ -929,6 +929,7 @@ export interface ComplianceSignedDocument {
   typeCode: string;
   subtype: string;
   isB2B: boolean;
+  isB2C?: boolean;
   uuid: string;
   icv: number;
   pih: string;

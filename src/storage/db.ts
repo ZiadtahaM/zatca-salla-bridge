@@ -125,6 +125,9 @@ export async function initializeDatabaseSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_invoices_order ON invoices(order_id);
       CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status);
       CREATE INDEX IF NOT EXISTS idx_invoices_egs_created ON invoices(egs_unit_id, created_at DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_order_original 
+      ON invoices(egs_unit_id, order_id) 
+      WHERE invoice_type IN ('tax_invoice', 'simplified_tax_invoice');
       ALTER TABLE invoices ALTER COLUMN pih TYPE VARCHAR(128);
       ALTER TABLE invoices ALTER COLUMN invoice_hash TYPE VARCHAR(128);
 

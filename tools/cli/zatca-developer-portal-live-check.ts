@@ -25,6 +25,7 @@ export interface ZatcaPayloadResult {
   };
   liveResponse?: {
     status: number;
+    headers?: Record<string, string>;
     body: any;
   };
 }
@@ -60,7 +61,7 @@ export async function buildZatcaDeveloperPortalRequest(
 
     const isB2B = options.isB2B ?? false;
     const baseUrl = process.env.ZATCA_PORTAL_BASE_URL || 'https://gw-fatoora.zatca.gov.sa/e-invoicing/developer-portal';
-    const endpoint = isB2B ? `${baseUrl}/invoices/clearance` : `${baseUrl}/invoices/reporting`;
+    const endpoint = isB2B ? `${baseUrl}/invoices/clearance/single` : `${baseUrl}/invoices/reporting/single`;
 
     // Fetch or construct sample invoice
     const invRes = await client.query(
@@ -124,11 +125,25 @@ export async function buildZatcaDeveloperPortalRequest(
           method: 'POST',
           headers,
           body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(10000)
+          signal: AbortSignal.timeout(15000)
         });
-        const resBody = await response.json().catch(() => ({}));
+        const rawText = await response.text();
+        let resBody: any;
+        try {
+          resBody = JSON.parse(rawText);
+        } catch {
+          resBody = { raw: rawText };
+        }
+        const respHeaders: Record<string, string> = {};
+        response.headers.forEach((v, k) => {
+          const lower = k.toLowerCase();
+          if (!lower.includes('cookie') && !lower.includes('auth')) {
+            respHeaders[lower] = v;
+          }
+        });
         result.liveResponse = {
           status: response.status,
+          headers: respHeaders,
           body: resBody
         };
       } catch (err: any) {
@@ -146,13 +161,28 @@ export async function buildZatcaDeveloperPortalRequest(
 }
 
 async function main(): Promise<void> {
+  const isLive = process.argv.includes('--live') || process.env.ZATCA_EXECUTE_LIVE_NETWORK === 'true';
+  const isB2B = process.argv.includes('--b2b');
+
   process.stdout.write('=== ZATCA Developer Portal Format Verification CLI ===\n');
-  const result = await buildZatcaDeveloperPortalRequest({ dryRun: true });
+  if (isLive) {
+    process.env.ZATCA_EXECUTE_LIVE_NETWORK = 'true';
+  }
+  const result = await buildZatcaDeveloperPortalRequest({ dryRun: !isLive, isB2B });
   process.stdout.write(`Target Endpoint: ${result.endpoint}\n`);
   process.stdout.write(`HTTP Method: ${result.method}\n`);
   process.stdout.write(`Headers:\n${JSON.stringify(result.headers, null, 2)}\n`);
   process.stdout.write(`Payload Structure:\n${JSON.stringify({ ...result.payload, invoice: result.payload.invoice.slice(0, 40) + '...' }, null, 2)}\n`);
   process.stdout.write(`Format Validation:\n${JSON.stringify(result.validationResult, null, 2)}\n`);
+
+  if (result.liveResponse) {
+    process.stdout.write('\n--- Live Gateway Response ---\n');
+    process.stdout.write(`HTTP Status: ${result.liveResponse.status}\n`);
+    if (result.liveResponse.headers) {
+      process.stdout.write(`Response Headers (sanitized):\n${JSON.stringify(result.liveResponse.headers, null, 2)}\n`);
+    }
+    process.stdout.write(`Response Body:\n${JSON.stringify(result.liveResponse.body, null, 2)}\n`);
+  }
   process.stdout.write('=== Verification Completed Successfully ===\n');
 }
 

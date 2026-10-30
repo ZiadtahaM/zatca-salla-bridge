@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { pool } from '../storage/db.js';
-import { onboardEgsUnit, renewProductionCsid, MockZatcaApiClient } from '../services/onboarding-service.js';
+import { onboardEgsUnit, renewProductionCsid, MockZatcaApiClient, LiveZatcaApiClient } from '../services/onboarding-service.js';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
 
@@ -50,7 +50,12 @@ export async function onboardingRoutes(fastify: FastifyInstance): Promise<void> 
         await client.query(`SELECT certificate FROM egs_units WHERE is_active = TRUE LIMIT 1`)
       ).rows[0]?.certificate;
 
-      const apiClient = new MockZatcaApiClient(mockCertPem || '');
+      const useLiveGateway = process.env.ZATCA_USE_LIVE_GATEWAY === 'true' ||
+                             Boolean(process.env.ZATCA_PORTAL_OTP && parseResult.data.otp === process.env.ZATCA_PORTAL_OTP);
+
+      const apiClient = useLiveGateway
+        ? new LiveZatcaApiClient(parseResult.data.environment || 'sandbox')
+        : new MockZatcaApiClient(mockCertPem || '');
 
       const result = await onboardEgsUnit(client, parseResult.data, workDir, apiClient);
 

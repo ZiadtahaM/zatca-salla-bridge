@@ -164,72 +164,84 @@ export async function refreshSallaTokenIfNeeded(
   customFetch: typeof fetch = fetch,
   tokenEndpoint: string = process.env.SALLA_OAUTH_URL || 'https://accounts.salla.sa/oauth2/token'
 ): Promise<DecryptedMerchantTokens | null> {
-  const tokens = await getSallaMerchantTokens(client, merchantId);
-  if (!tokens) {
-    return null;
+  // Acquire an advisory lock keyed to the merchantId to serialize refresh requests
+  // and prevent single-use token replay invalidations.
+  await client.query(`SELECT pg_advisory_lock(hashtext('salla_refresh_' || $1))`, [merchantId]);
+
+  try {
+    const tokens = await getSallaMerchantTokens(client, merchantId);
+    if (!tokens) {
+      return null;
+    }
+
+    const now = Date.now();
+    const diffMs = tokens.expiresAt.getTime() - now;
+    const twentyFourHoursMs = 24 * 60 * 60 * 1000;
+
+    // If another worker completed the refresh while this worker waited for the advisory lock,
+    // return the fresh token immediately without sending the already-invalidated refresh token to Salla.
+    if (!force && diffMs > twentyFourHoursMs) {
+      return tokens;
+    }
+
+    const clientId = process.env.SALLA_CLIENT_ID || 'dummy_salla_client_id';
+    const clientSecret = process.env.SALLA_CLIENT_SECRET || 'dummy_salla_client_secret';
+
+    const bodyParams = new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'refresh_token',
+      refresh_token: tokens.refreshToken
+    });
+
+    const response = await customFetch(tokenEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/json'
+      },
+      body: bodyParams.toString()
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to refresh Salla OAuth token for merchant ${merchantId}: ${response.status} - ${errorText}`);
+    }
+
+    const json = (await response.json()) as any;
+    const newAccessToken = json.access_token || json.data?.access_token;
+    const newRefreshToken = json.refresh_token || json.data?.refresh_token;
+    const expiresIn = Number(json.expires_in || json.data?.expires_in || 1209600);
+
+    if (!newAccessToken || !newRefreshToken) {
+      throw new Error(`Malformed response from Salla token refresh: missing access_token or refresh_token`);
+    }
+
+    const encryptedAccess = encryptVaultSecret(newAccessToken);
+    const encryptedRefresh = encryptVaultSecret(newRefreshToken);
+    const newExpiresAt = new Date(Date.now() + expiresIn * 1000);
+
+    await client.query(
+      `UPDATE merchant_tokens
+       SET access_token_encrypted = $1,
+           refresh_token_encrypted = $2,
+           expires_at = $3,
+           updated_at = NOW()
+       WHERE merchant_id = $4`,
+      [encryptedAccess, encryptedRefresh, newExpiresAt.toISOString(), merchantId]
+    );
+
+    return {
+      ...tokens,
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
+      expiresAt: newExpiresAt
+    };
+  } finally {
+    try {
+      await client.query(`SELECT pg_advisory_unlock(hashtext('salla_refresh_' || $1))`, [merchantId]);
+    } catch {}
   }
-
-  const now = Date.now();
-  const diffMs = tokens.expiresAt.getTime() - now;
-  const twentyFourHoursMs = 24 * 60 * 60 * 1000;
-
-  if (!force && diffMs > twentyFourHoursMs) {
-    return tokens;
-  }
-
-  const clientId = process.env.SALLA_CLIENT_ID || 'dummy_salla_client_id';
-  const clientSecret = process.env.SALLA_CLIENT_SECRET || 'dummy_salla_client_secret';
-
-  const bodyParams = new URLSearchParams({
-    client_id: clientId,
-    client_secret: clientSecret,
-    grant_type: 'refresh_token',
-    refresh_token: tokens.refreshToken
-  });
-
-  const response = await customFetch(tokenEndpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Accept: 'application/json'
-    },
-    body: bodyParams.toString()
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Failed to refresh Salla OAuth token for merchant ${merchantId}: ${response.status} - ${errorText}`);
-  }
-
-  const json = (await response.json()) as any;
-  const newAccessToken = json.access_token || json.data?.access_token;
-  const newRefreshToken = json.refresh_token || json.data?.refresh_token;
-  const expiresIn = Number(json.expires_in || json.data?.expires_in || 1209600);
-
-  if (!newAccessToken || !newRefreshToken) {
-    throw new Error(`Malformed response from Salla token refresh: missing access_token or refresh_token`);
-  }
-
-  const encryptedAccess = encryptVaultSecret(newAccessToken);
-  const encryptedRefresh = encryptVaultSecret(newRefreshToken);
-  const newExpiresAt = new Date(Date.now() + expiresIn * 1000);
-
-  await client.query(
-    `UPDATE merchant_tokens
-     SET access_token_encrypted = $1,
-         refresh_token_encrypted = $2,
-         expires_at = $3,
-         updated_at = NOW()
-     WHERE merchant_id = $4`,
-    [encryptedAccess, encryptedRefresh, newExpiresAt.toISOString(), merchantId]
-  );
-
-  return {
-    ...tokens,
-    accessToken: newAccessToken,
-    refreshToken: newRefreshToken,
-    expiresAt: newExpiresAt
-  };
 }
 
 export async function updateMerchantSubscription(

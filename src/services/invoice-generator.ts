@@ -747,6 +747,573 @@ ${linesXml}
 </Invoice>`;
 }
 
+export function buildUblDebitNoteXml(options: {
+  order: SallaOrderData;
+  originalInvoiceUuid: string;
+  originalIcv: number;
+  debitReason: string;
+  uuid: string;
+  icv: number;
+  pih: string;
+  issueDate: string;
+  issueTime: string;
+  sellerNameArabic: string;
+  sellerVat: string;
+  sellerCrn: string;
+  isB2C: boolean;
+}): string {
+  const invoiceTypeCodeName = options.isB2C ? '0200000' : '0100000';
+  const customerPartyBlock = options.isB2C
+    ? `  <cac:AccountingCustomerParty>
+    <cac:Party>
+      <cac:PostalAddress>
+        <cac:Country>
+          <cbc:IdentificationCode>SA</cbc:IdentificationCode>
+        </cac:Country>
+      </cac:PostalAddress>
+    </cac:Party>
+  </cac:AccountingCustomerParty>`
+    : `  <cac:AccountingCustomerParty>
+    <cac:Party>
+      <cac:PartyIdentification>
+        <cbc:ID schemeID="CRN">7000000001</cbc:ID>
+      </cac:PartyIdentification>
+      <cac:PostalAddress>
+        <cbc:StreetName>${options.order.shipping?.address?.street || 'Commercial Street'}</cbc:StreetName>
+        <cbc:BuildingNumber>${options.order.shipping?.address?.building_number || '1000'}</cbc:BuildingNumber>
+        <cbc:CitySubdivisionName>${options.order.shipping?.address?.district || 'District'}</cbc:CitySubdivisionName>
+        <cbc:CityName>${options.order.shipping?.address?.city || 'Riyadh'}</cbc:CityName>
+        <cbc:PostalZone>${options.order.shipping?.address?.postal_code || '12345'}</cbc:PostalZone>
+        <cac:Country>
+          <cbc:IdentificationCode>SA</cbc:IdentificationCode>
+        </cac:Country>
+      </cac:PostalAddress>
+      <cac:PartyTaxScheme>
+        <cbc:CompanyID>${options.order.customer.tax_number?.trim() || '300000000000003'}</cbc:CompanyID>
+        <cac:TaxScheme>
+          <cbc:ID>VAT</cbc:ID>
+        </cac:TaxScheme>
+      </cac:PartyTaxScheme>
+      <cac:PartyLegalEntity>
+        <cbc:RegistrationName>${(options.order.customer.company_name || `${options.order.customer.first_name} ${options.order.customer.last_name || ''}`).trim().normalize('NFC')}</cbc:RegistrationName>
+      </cac:PartyLegalEntity>
+    </cac:Party>
+  </cac:AccountingCustomerParty>`;
+
+  const lineExtensionTotal = options.order.amounts.sub_total.amount;
+  const declaredTaxTotal = options.order.amounts.tax.amount.amount;
+  const grandTotal = Number((lineExtensionTotal + declaredTaxTotal).toFixed(2));
+
+  const linesXml = options.order.items
+    .map((item: SallaOrderItem, index: number) => {
+      const lineNum = index + 1;
+      const itemPrice = item.price.amount.toFixed(2);
+      const lineExtension = (item.price.amount * item.quantity).toFixed(2);
+      const lineTax = (item.price.amount * item.quantity * 0.15).toFixed(2);
+      const lineGross = (Number(lineExtension) + Number(lineTax)).toFixed(2);
+      const itemName = item.name.trim().normalize('NFC');
+
+      return `  <cac:InvoiceLine>
+    <cbc:ID>${lineNum}</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="PCE">${item.quantity}</cbc:InvoicedQuantity>
+    <cbc:LineExtensionAmount currencyID="SAR">${lineExtension}</cbc:LineExtensionAmount>
+    <cac:TaxTotal>
+      <cbc:TaxAmount currencyID="SAR">${lineTax}</cbc:TaxAmount>
+      <cbc:RoundingAmount currencyID="SAR">${lineGross}</cbc:RoundingAmount>
+    </cac:TaxTotal>
+    <cac:Item>
+      <cbc:Name>${itemName}</cbc:Name>
+      <cac:ClassifiedTaxCategory>
+        <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">S</cbc:ID>
+        <cbc:Percent>15.00</cbc:Percent>
+        <cac:TaxScheme>
+          <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5153">VAT</cbc:ID>
+        </cac:TaxScheme>
+      </cac:ClassifiedTaxCategory>
+    </cac:Item>
+    <cac:Price>
+      <cbc:PriceAmount currencyID="SAR">${itemPrice}</cbc:PriceAmount>
+    </cac:Price>
+  </cac:InvoiceLine>`;
+    })
+    .join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2">
+  <cbc:ProfileID>reporting:1.0</cbc:ProfileID>
+  <cbc:ID>DN-${options.icv}</cbc:ID>
+  <cbc:UUID>${options.uuid}</cbc:UUID>
+  <cbc:IssueDate>${options.issueDate}</cbc:IssueDate>
+  <cbc:IssueTime>${options.issueTime}</cbc:IssueTime>
+  <cbc:InvoiceTypeCode name="${invoiceTypeCodeName}">383</cbc:InvoiceTypeCode>
+  <cbc:DocumentCurrencyCode>SAR</cbc:DocumentCurrencyCode>
+  <cbc:TaxCurrencyCode>SAR</cbc:TaxCurrencyCode>
+  <cac:BillingReference>
+    <cac:InvoiceDocumentReference>
+      <cbc:ID>${options.originalInvoiceUuid}</cbc:ID>
+    </cac:InvoiceDocumentReference>
+  </cac:BillingReference>
+  <cac:AdditionalDocumentReference>
+    <cbc:ID>ICV</cbc:ID>
+    <cbc:UUID>${options.icv}</cbc:UUID>
+  </cac:AdditionalDocumentReference>
+  <cac:AdditionalDocumentReference>
+    <cbc:ID>PIH</cbc:ID>
+    <cac:Attachment>
+      <cac:EmbeddedDocumentBinaryObject mimeCode="text/plain">${options.pih}</cac:EmbeddedDocumentBinaryObject>
+    </cac:Attachment>
+  </cac:AdditionalDocumentReference>
+  <cac:AccountingSupplierParty>
+    <cac:Party>
+      <cac:PartyIdentification>
+        <cbc:ID schemeID="CRN">${options.sellerCrn}</cbc:ID>
+      </cac:PartyIdentification>
+      <cac:PostalAddress>
+        <cbc:StreetName>King Fahd Road</cbc:StreetName>
+        <cbc:BuildingNumber>1234</cbc:BuildingNumber>
+        <cbc:CitySubdivisionName>Al-Olaya</cbc:CitySubdivisionName>
+        <cbc:CityName>Riyadh</cbc:CityName>
+        <cbc:PostalZone>12211</cbc:PostalZone>
+        <cac:Country>
+          <cbc:IdentificationCode>SA</cbc:IdentificationCode>
+        </cac:Country>
+      </cac:PostalAddress>
+      <cac:PartyTaxScheme>
+        <cbc:CompanyID>${options.sellerVat}</cbc:CompanyID>
+        <cac:TaxScheme>
+          <cbc:ID>VAT</cbc:ID>
+        </cac:TaxScheme>
+      </cac:PartyTaxScheme>
+      <cac:PartyLegalEntity>
+        <cbc:RegistrationName>${options.sellerNameArabic.normalize('NFC')}</cbc:RegistrationName>
+      </cac:PartyLegalEntity>
+    </cac:Party>
+  </cac:AccountingSupplierParty>
+${customerPartyBlock}
+  <cac:PaymentMeans>
+    <cbc:PaymentMeansCode>10</cbc:PaymentMeansCode>
+    <cbc:InstructionNote>${options.debitReason.normalize('NFC')}</cbc:InstructionNote>
+  </cac:PaymentMeans>
+  <cac:TaxTotal>
+    <cbc:TaxAmount currencyID="SAR">${declaredTaxTotal.toFixed(2)}</cbc:TaxAmount>
+  </cac:TaxTotal>
+  <cac:TaxTotal>
+    <cbc:TaxAmount currencyID="SAR">${declaredTaxTotal.toFixed(2)}</cbc:TaxAmount>
+    <cac:TaxSubtotal>
+      <cbc:TaxableAmount currencyID="SAR">${lineExtensionTotal.toFixed(2)}</cbc:TaxableAmount>
+      <cbc:TaxAmount currencyID="SAR">${declaredTaxTotal.toFixed(2)}</cbc:TaxAmount>
+      <cac:TaxCategory>
+        <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">S</cbc:ID>
+        <cbc:Percent>15.00</cbc:Percent>
+        <cac:TaxScheme>
+          <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5153">VAT</cbc:ID>
+        </cac:TaxScheme>
+      </cac:TaxCategory>
+    </cac:TaxSubtotal>
+  </cac:TaxTotal>
+  <cac:LegalMonetaryTotal>
+    <cbc:LineExtensionAmount currencyID="SAR">${lineExtensionTotal.toFixed(2)}</cbc:LineExtensionAmount>
+    <cbc:TaxExclusiveAmount currencyID="SAR">${lineExtensionTotal.toFixed(2)}</cbc:TaxExclusiveAmount>
+    <cbc:TaxInclusiveAmount currencyID="SAR">${grandTotal.toFixed(2)}</cbc:TaxInclusiveAmount>
+    <cbc:AllowanceTotalAmount currencyID="SAR">0.00</cbc:AllowanceTotalAmount>
+    <cbc:ChargeTotalAmount currencyID="SAR">0.00</cbc:ChargeTotalAmount>
+    <cbc:PrepaidAmount currencyID="SAR">0.00</cbc:PrepaidAmount>
+    <cbc:PayableAmount currencyID="SAR">${grandTotal.toFixed(2)}</cbc:PayableAmount>
+  </cac:LegalMonetaryTotal>
+${linesXml}
+</Invoice>`;
+}
+
+export interface ComplianceSignedDocument {
+  name: string;
+  typeCode: string;
+  subtype: string;
+  isB2B: boolean;
+  uuid: string;
+  icv: number;
+  pih: string;
+  invoiceHash: string;
+  signedXml: string;
+  payload: {
+    invoiceHash: string;
+    uuid: string;
+    invoice: string;
+  };
+}
+
+export function generateComplianceDocumentSet(options: {
+  sellerNameArabic: string;
+  sellerVat: string;
+  sellerCrn: string;
+  privateKeyPem: string;
+  certPem: string;
+}): ComplianceSignedDocument[] {
+  const now = new Date();
+  const issueDate = now.toISOString().split('T')[0];
+  const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
+  const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
+
+  const sampleB2bOrder: SallaOrderData = {
+    id: `COMPL-ORD-B2B-${Date.now()}`,
+    reference_id: `REF-B2B-${Date.now()}`,
+    date: { date: `${issueDate} ${issueTime}`, timezone: 'Asia/Riyadh' },
+    status: { id: 1, name: 'Delivered', slug: 'delivered' },
+    payment_method: 'bank_transfer',
+    currency: 'SAR',
+    customer: {
+      id: 501,
+      first_name: 'شركة',
+      last_name: 'التقنية المتقدمة',
+      company_name: 'شركة التقنية المتقدمة للتجارة',
+      tax_number: '300000000000003'
+    },
+    shipping: {
+      address: {
+        street: 'King Fahd Road',
+        building_number: '1234',
+        district: 'Al-Olaya',
+        city: 'Riyadh',
+        postal_code: '12211',
+        country: 'SA'
+      }
+    },
+    items: [
+      {
+        id: 1,
+        name: 'جهاز خادم شبكات متقدم / Enterprise Network Appliance',
+        quantity: 1,
+        price: { amount: 1000.0, currency: 'SAR' },
+        total: { amount: 1000.0, currency: 'SAR' }
+      }
+    ],
+    amounts: {
+      sub_total: { amount: 1000.0, currency: 'SAR' },
+      tax: {
+        percent: 15,
+        amount: { amount: 150.0, currency: 'SAR' }
+      },
+      total: { amount: 1150.0, currency: 'SAR' }
+    }
+  };
+
+  const sampleB2cOrder: SallaOrderData = {
+    id: `COMPL-ORD-B2C-${Date.now()}`,
+    reference_id: `REF-B2C-${Date.now()}`,
+    date: { date: `${issueDate} ${issueTime}`, timezone: 'Asia/Riyadh' },
+    status: { id: 1, name: 'Delivered', slug: 'delivered' },
+    payment_method: 'credit_card',
+    currency: 'SAR',
+    customer: {
+      id: 502,
+      first_name: 'أحمد',
+      last_name: 'الغامدي',
+      tax_number: null
+    },
+    shipping: {
+      address: {
+        street: 'Tahlia Street',
+        city: 'Jeddah',
+        country: 'SA'
+      }
+    },
+    items: [
+      {
+        id: 1,
+        name: 'عطر العود الملكي / Royal Oud Perfume',
+        quantity: 1,
+        price: { amount: 200.0, currency: 'SAR' },
+        total: { amount: 200.0, currency: 'SAR' }
+      }
+    ],
+    amounts: {
+      sub_total: { amount: 200.0, currency: 'SAR' },
+      tax: {
+        percent: 15,
+        amount: { amount: 30.0, currency: 'SAR' }
+      },
+      total: { amount: 230.0, currency: 'SAR' }
+    }
+  };
+
+  const docs: ComplianceSignedDocument[] = [];
+  let currentPih = 'NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODU4ZjgyYTgwMjdhMDY1ZDE4MGNkNGI3Nzg4MzBkNWU1NTc1OWQ2ODU5Nw==';
+
+  // 1. Standard B2B Invoice (388)
+  const b2bInvUuid = crypto.randomUUID();
+  const b2bInvRaw = buildUblXmlFromSallaOrder({
+    order: sampleB2bOrder,
+    uuid: b2bInvUuid,
+    icv: 1,
+    pih: currentPih,
+    issueDate,
+    issueTime,
+    sellerNameArabic: options.sellerNameArabic,
+    sellerVat: options.sellerVat,
+    sellerCrn: options.sellerCrn,
+    isB2C: false
+  });
+  const b2bInvSigned = signZatcaInvoiceExact({
+    rawXml: b2bInvRaw,
+    privateKeyPem: options.privateKeyPem,
+    certPem: options.certPem,
+    sellerNameArabic: options.sellerNameArabic,
+    sellerVatNumber: options.sellerVat,
+    grandTotal: '1150.00',
+    vatTotal: '150.00',
+    issueDateTimeIsoZ,
+    isB2C: false
+  });
+  docs.push({
+    name: 'Standard B2B Tax Invoice',
+    typeCode: '388',
+    subtype: '0100000',
+    isB2B: true,
+    uuid: b2bInvUuid,
+    icv: 1,
+    pih: currentPih,
+    invoiceHash: b2bInvSigned.invoiceHashBase64,
+    signedXml: b2bInvSigned.signedXml,
+    payload: {
+      invoiceHash: b2bInvSigned.invoiceHashBase64,
+      uuid: b2bInvUuid,
+      invoice: Buffer.from(b2bInvSigned.signedXml, 'utf8').toString('base64')
+    }
+  });
+  currentPih = b2bInvSigned.invoiceHashBase64;
+
+  // 2. Standard B2B Credit Note (381)
+  const b2bCnUuid = crypto.randomUUID();
+  const b2bCnRaw = buildUblCreditNoteXmlFromSallaRefund({
+    order: sampleB2bOrder,
+    originalInvoiceUuid: b2bInvUuid,
+    originalIcv: 1,
+    returnReason: 'Return of defective hardware / إرجاع عتاد معيب',
+    uuid: b2bCnUuid,
+    icv: 2,
+    pih: currentPih,
+    issueDate,
+    issueTime,
+    sellerNameArabic: options.sellerNameArabic,
+    sellerVat: options.sellerVat,
+    sellerCrn: options.sellerCrn,
+    isB2C: false
+  });
+  const b2bCnSigned = signZatcaInvoiceExact({
+    rawXml: b2bCnRaw,
+    privateKeyPem: options.privateKeyPem,
+    certPem: options.certPem,
+    sellerNameArabic: options.sellerNameArabic,
+    sellerVatNumber: options.sellerVat,
+    grandTotal: '1150.00',
+    vatTotal: '150.00',
+    issueDateTimeIsoZ,
+    isB2C: false
+  });
+  docs.push({
+    name: 'Standard B2B Credit Note',
+    typeCode: '381',
+    subtype: '0100000',
+    isB2B: true,
+    uuid: b2bCnUuid,
+    icv: 2,
+    pih: currentPih,
+    invoiceHash: b2bCnSigned.invoiceHashBase64,
+    signedXml: b2bCnSigned.signedXml,
+    payload: {
+      invoiceHash: b2bCnSigned.invoiceHashBase64,
+      uuid: b2bCnUuid,
+      invoice: Buffer.from(b2bCnSigned.signedXml, 'utf8').toString('base64')
+    }
+  });
+  currentPih = b2bCnSigned.invoiceHashBase64;
+
+  // 3. Standard B2B Debit Note (383)
+  const b2bDnUuid = crypto.randomUUID();
+  const b2bDnRaw = buildUblDebitNoteXml({
+    order: sampleB2bOrder,
+    originalInvoiceUuid: b2bInvUuid,
+    originalIcv: 1,
+    debitReason: 'Price adjustment for extra maintenance / تعديل رسوم صيانة إضافية',
+    uuid: b2bDnUuid,
+    icv: 3,
+    pih: currentPih,
+    issueDate,
+    issueTime,
+    sellerNameArabic: options.sellerNameArabic,
+    sellerVat: options.sellerVat,
+    sellerCrn: options.sellerCrn,
+    isB2C: false
+  });
+  const b2bDnSigned = signZatcaInvoiceExact({
+    rawXml: b2bDnRaw,
+    privateKeyPem: options.privateKeyPem,
+    certPem: options.certPem,
+    sellerNameArabic: options.sellerNameArabic,
+    sellerVatNumber: options.sellerVat,
+    grandTotal: '1150.00',
+    vatTotal: '150.00',
+    issueDateTimeIsoZ,
+    isB2C: false
+  });
+  docs.push({
+    name: 'Standard B2B Debit Note',
+    typeCode: '383',
+    subtype: '0100000',
+    isB2B: true,
+    uuid: b2bDnUuid,
+    icv: 3,
+    pih: currentPih,
+    invoiceHash: b2bDnSigned.invoiceHashBase64,
+    signedXml: b2bDnSigned.signedXml,
+    payload: {
+      invoiceHash: b2bDnSigned.invoiceHashBase64,
+      uuid: b2bDnUuid,
+      invoice: Buffer.from(b2bDnSigned.signedXml, 'utf8').toString('base64')
+    }
+  });
+  currentPih = b2bDnSigned.invoiceHashBase64;
+
+  // 4. Simplified B2C Invoice (388)
+  const b2cInvUuid = crypto.randomUUID();
+  const b2cInvRaw = buildUblXmlFromSallaOrder({
+    order: sampleB2cOrder,
+    uuid: b2cInvUuid,
+    icv: 4,
+    pih: currentPih,
+    issueDate,
+    issueTime,
+    sellerNameArabic: options.sellerNameArabic,
+    sellerVat: options.sellerVat,
+    sellerCrn: options.sellerCrn,
+    isB2C: true
+  });
+  const b2cInvSigned = signZatcaInvoiceExact({
+    rawXml: b2cInvRaw,
+    privateKeyPem: options.privateKeyPem,
+    certPem: options.certPem,
+    sellerNameArabic: options.sellerNameArabic,
+    sellerVatNumber: options.sellerVat,
+    grandTotal: '230.00',
+    vatTotal: '30.00',
+    issueDateTimeIsoZ,
+    isB2C: true
+  });
+  docs.push({
+    name: 'Simplified B2C Tax Invoice',
+    typeCode: '388',
+    subtype: '0200000',
+    isB2C: true,
+    isB2B: false,
+    uuid: b2cInvUuid,
+    icv: 4,
+    pih: currentPih,
+    invoiceHash: b2cInvSigned.invoiceHashBase64,
+    signedXml: b2cInvSigned.signedXml,
+    payload: {
+      invoiceHash: b2cInvSigned.invoiceHashBase64,
+      uuid: b2cInvUuid,
+      invoice: Buffer.from(b2cInvSigned.signedXml, 'utf8').toString('base64')
+    }
+  });
+  currentPih = b2cInvSigned.invoiceHashBase64;
+
+  // 5. Simplified B2C Credit Note (381)
+  const b2cCnUuid = crypto.randomUUID();
+  const b2cCnRaw = buildUblCreditNoteXmlFromSallaRefund({
+    order: sampleB2cOrder,
+    originalInvoiceUuid: b2cInvUuid,
+    originalIcv: 4,
+    returnReason: 'Order cancelled before shipment / إلغاء طلب قبل الشحن',
+    uuid: b2cCnUuid,
+    icv: 5,
+    pih: currentPih,
+    issueDate,
+    issueTime,
+    sellerNameArabic: options.sellerNameArabic,
+    sellerVat: options.sellerVat,
+    sellerCrn: options.sellerCrn,
+    isB2C: true
+  });
+  const b2cCnSigned = signZatcaInvoiceExact({
+    rawXml: b2cCnRaw,
+    privateKeyPem: options.privateKeyPem,
+    certPem: options.certPem,
+    sellerNameArabic: options.sellerNameArabic,
+    sellerVatNumber: options.sellerVat,
+    grandTotal: '230.00',
+    vatTotal: '30.00',
+    issueDateTimeIsoZ,
+    isB2C: true
+  });
+  docs.push({
+    name: 'Simplified B2C Credit Note',
+    typeCode: '381',
+    subtype: '0200000',
+    isB2C: true,
+    isB2B: false,
+    uuid: b2cCnUuid,
+    icv: 5,
+    pih: currentPih,
+    invoiceHash: b2cCnSigned.invoiceHashBase64,
+    signedXml: b2cCnSigned.signedXml,
+    payload: {
+      invoiceHash: b2cCnSigned.invoiceHashBase64,
+      uuid: b2cCnUuid,
+      invoice: Buffer.from(b2cCnSigned.signedXml, 'utf8').toString('base64')
+    }
+  });
+  currentPih = b2cCnSigned.invoiceHashBase64;
+
+  // 6. Simplified B2C Debit Note (383)
+  const b2cDnUuid = crypto.randomUUID();
+  const b2cDnRaw = buildUblDebitNoteXml({
+    order: sampleB2cOrder,
+    originalInvoiceUuid: b2cInvUuid,
+    originalIcv: 4,
+    debitReason: 'Additional delivery charges / رسوم توصيل إضافية',
+    uuid: b2cDnUuid,
+    icv: 6,
+    pih: currentPih,
+    issueDate,
+    issueTime,
+    sellerNameArabic: options.sellerNameArabic,
+    sellerVat: options.sellerVat,
+    sellerCrn: options.sellerCrn,
+    isB2C: true
+  });
+  const b2cDnSigned = signZatcaInvoiceExact({
+    rawXml: b2cDnRaw,
+    privateKeyPem: options.privateKeyPem,
+    certPem: options.certPem,
+    sellerNameArabic: options.sellerNameArabic,
+    sellerVatNumber: options.sellerVat,
+    grandTotal: '230.00',
+    vatTotal: '30.00',
+    issueDateTimeIsoZ,
+    isB2C: true
+  });
+  docs.push({
+    name: 'Simplified B2C Debit Note',
+    typeCode: '383',
+    subtype: '0200000',
+    isB2C: true,
+    isB2B: false,
+    uuid: b2cDnUuid,
+    icv: 6,
+    pih: currentPih,
+    invoiceHash: b2cDnSigned.invoiceHashBase64,
+    signedXml: b2cDnSigned.signedXml,
+    payload: {
+      invoiceHash: b2cDnSigned.invoiceHashBase64,
+      uuid: b2cDnUuid,
+      invoice: Buffer.from(b2cDnSigned.signedXml, 'utf8').toString('base64')
+    }
+  });
+
+  return docs;
+}
+
+
 const egsMutexMap = new Map<string, Promise<any>>();
 
 export async function withEgsMutex<T>(egsUnitId: string, fn: () => Promise<T>): Promise<T> {

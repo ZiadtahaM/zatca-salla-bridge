@@ -1,7 +1,8 @@
 import { PoolClient, Pool } from 'pg';
-import { generateZatcaCsr, CsrInput, ZatcaEnvironment } from './csr-generator.js';
+import { generateZatcaCsr, CsrInput, ZatcaEnvironment, getZatcaBaseUrl } from './csr-generator.js';
 import { extractX509Metadata } from '../crypto/zatca-signer.js';
 import { encryptVaultSecret } from '../crypto/vault.js';
+import { generateComplianceDocumentSet } from './invoice-generator.js';
 import { X509Certificate } from 'node:crypto';
 import { rmSync } from 'node:fs';
 
@@ -96,6 +97,149 @@ export class MockZatcaApiClient implements ZatcaApiClient {
   }
 }
 
+export class LiveZatcaApiClient implements ZatcaApiClient {
+  private baseUrl: string;
+
+  constructor(environment: ZatcaEnvironment = 'sandbox') {
+    this.baseUrl = getZatcaBaseUrl(environment);
+  }
+
+  async requestComplianceCsid(csrBase64: string, otp: string): Promise<{
+    requestID: string;
+    binarySecurityToken: string;
+    secret: string;
+  }> {
+    const url = `${this.baseUrl}/compliance`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Accept-Version': 'V2',
+        'Accept-Language': 'en',
+        'Content-Type': 'application/json',
+        'OTP': otp
+      },
+      body: JSON.stringify({ csr: csrBase64 })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`ZATCA Compliance CSID request failed (${response.status}): ${errText}`);
+    }
+
+    const data = (await response.json()) as any;
+    return {
+      requestID: String(data.requestID || data.requestId || ''),
+      binarySecurityToken: data.binarySecurityToken,
+      secret: data.secret
+    };
+  }
+
+  async submitComplianceInvoice(
+    signedXml: string,
+    invoiceHash: string,
+    uuid: string,
+    token: string,
+    secret: string
+  ): Promise<boolean> {
+    const url = `${this.baseUrl}/compliance/invoices`;
+    const authCredentials = Buffer.from(`${token}:${secret}`).toString('base64');
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Accept-Version': 'V2',
+        'Accept-Language': 'en',
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${authCredentials}`
+      },
+      body: JSON.stringify({
+        invoiceHash,
+        uuid,
+        invoice: Buffer.from(signedXml, 'utf8').toString('base64')
+      })
+    });
+
+    if (response.status === 200 || response.status === 202) {
+      return true;
+    }
+    const errText = await response.text();
+    throw new Error(`ZATCA Compliance invoice validation failed (${response.status}): ${errText}`);
+  }
+
+  async requestProductionCsid(
+    complianceRequestId: string,
+    token: string,
+    secret: string
+  ): Promise<{
+    requestID: string;
+    binarySecurityToken: string;
+    secret: string;
+  }> {
+    const url = `${this.baseUrl}/production/csids`;
+    const authCredentials = Buffer.from(`${token}:${secret}`).toString('base64');
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Accept-Version': 'V2',
+        'Accept-Language': 'en',
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${authCredentials}`
+      },
+      body: JSON.stringify({
+        compliance_request_id: complianceRequestId
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`ZATCA Production CSID exchange failed (${response.status}): ${errText}`);
+    }
+
+    const data = (await response.json()) as any;
+    return {
+      requestID: String(data.requestID || data.requestId || complianceRequestId),
+      binarySecurityToken: data.binarySecurityToken,
+      secret: data.secret
+    };
+  }
+
+  async renewCsid(
+    csrBase64: string,
+    otp: string,
+    token: string,
+    secret: string
+  ): Promise<{
+    requestID: string;
+    binarySecurityToken: string;
+    secret: string;
+  }> {
+    const url = `${this.baseUrl}/production/csids`;
+    const authCredentials = Buffer.from(`${token}:${secret}`).toString('base64');
+    const response = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        'Accept-Version': 'V2',
+        'Accept-Language': 'en',
+        'Content-Type': 'application/json',
+        'OTP': otp,
+        'Authorization': `Basic ${authCredentials}`
+      },
+      body: JSON.stringify({ csr: csrBase64 })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`ZATCA CSID renewal failed (${response.status}): ${errText}`);
+    }
+
+    const data = (await response.json()) as any;
+    return {
+      requestID: String(data.requestID || data.requestId || ''),
+      binarySecurityToken: data.binarySecurityToken,
+      secret: data.secret
+    };
+  }
+}
+
 export async function onboardEgsUnit(
   client: PoolClient | Pool,
   req: OnboardMerchantRequest,
@@ -129,14 +273,33 @@ export async function onboardEgsUnit(
 
   // 2. Submit mandatory compliance checks (SallaApp/ZATCA Issue #66: 6 combinations for 1100 flag)
   if (csrInput.invoiceType === '1100' || !csrInput.invoiceType) {
-    // Standard B2B Invoice, Credit Note, Debit Note
-    await apiClient.submitComplianceInvoice('<dummy-standard-388/>', 'hash-std-388', 'uuid-std-388', ccsidRes.binarySecurityToken, ccsidRes.secret);
-    await apiClient.submitComplianceInvoice('<dummy-standard-381/>', 'hash-std-381', 'uuid-std-381', ccsidRes.binarySecurityToken, ccsidRes.secret);
-    await apiClient.submitComplianceInvoice('<dummy-standard-383/>', 'hash-std-383', 'uuid-std-383', ccsidRes.binarySecurityToken, ccsidRes.secret);
-    // Simplified B2C Invoice, Credit Note, Debit Note
-    await apiClient.submitComplianceInvoice('<dummy-simplified-388/>', 'hash-smp-388', 'uuid-smp-388', ccsidRes.binarySecurityToken, ccsidRes.secret);
-    await apiClient.submitComplianceInvoice('<dummy-simplified-381/>', 'hash-smp-381', 'uuid-smp-381', ccsidRes.binarySecurityToken, ccsidRes.secret);
-    await apiClient.submitComplianceInvoice('<dummy-simplified-383/>', 'hash-smp-383', 'uuid-smp-383', ccsidRes.binarySecurityToken, ccsidRes.secret);
+    if (apiClient instanceof MockZatcaApiClient) {
+      await apiClient.submitComplianceInvoice('<dummy-standard-388/>', 'hash-std-388', 'uuid-std-388', ccsidRes.binarySecurityToken, ccsidRes.secret);
+      await apiClient.submitComplianceInvoice('<dummy-standard-381/>', 'hash-std-381', 'uuid-std-381', ccsidRes.binarySecurityToken, ccsidRes.secret);
+      await apiClient.submitComplianceInvoice('<dummy-standard-383/>', 'hash-std-383', 'uuid-std-383', ccsidRes.binarySecurityToken, ccsidRes.secret);
+      await apiClient.submitComplianceInvoice('<dummy-simplified-388/>', 'hash-smp-388', 'uuid-smp-388', ccsidRes.binarySecurityToken, ccsidRes.secret);
+      await apiClient.submitComplianceInvoice('<dummy-simplified-381/>', 'hash-smp-381', 'uuid-smp-381', ccsidRes.binarySecurityToken, ccsidRes.secret);
+      await apiClient.submitComplianceInvoice('<dummy-simplified-383/>', 'hash-smp-383', 'uuid-smp-383', ccsidRes.binarySecurityToken, ccsidRes.secret);
+    } else {
+      const wrappedComplianceCert = (ccsidRes.binarySecurityToken.replace(/\s+/g, '').match(/.{1,64}/g) || []).join('\n');
+      const complianceCertPem = `-----BEGIN CERTIFICATE-----\n${wrappedComplianceCert}\n-----END CERTIFICATE-----\n`;
+      const complianceDocs = generateComplianceDocumentSet({
+        sellerNameArabic: req.storeName,
+        sellerVat: req.vatNumber,
+        sellerCrn: req.crn || '1010010000',
+        privateKeyPem,
+        certPem: complianceCertPem
+      });
+      for (const doc of complianceDocs) {
+        await apiClient.submitComplianceInvoice(
+          doc.signedXml,
+          doc.invoiceHash,
+          doc.uuid,
+          ccsidRes.binarySecurityToken,
+          ccsidRes.secret
+        );
+      }
+    }
   } else {
     await apiClient.submitComplianceInvoice('<dummy-b2b/>', 'dummy-hash-1', 'uuid-1', ccsidRes.binarySecurityToken, ccsidRes.secret);
     await apiClient.submitComplianceInvoice('<dummy-b2c/>', 'dummy-hash-2', 'uuid-2', ccsidRes.binarySecurityToken, ccsidRes.secret);

@@ -96,6 +96,24 @@ export const SallaWebhookPayloadSchema = z.discriminatedUnion('event', [
     data: SallaOrderDataSchema
   }),
   z.object({
+    event: z.literal('order.status.updated'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaOrderDataSchema
+  }),
+  z.object({
+    event: z.literal('order.payment.updated'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaOrderDataSchema
+  }),
+  z.object({
+    event: z.literal('order.shipping.address.updated'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaOrderDataSchema
+  }),
+  z.object({
     event: z.literal('order.refunded'),
     merchant: z.number().or(z.string()),
     created_at: z.string(),

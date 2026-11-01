@@ -257,6 +257,8 @@ export async function initializeDatabaseSchema(): Promise<void> {
           id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
           merchant_id VARCHAR(64) NOT NULL,
           order_id VARCHAR(128) NOT NULL,
+          internal_order_id VARCHAR(128),
+          salla_refund_id VARCHAR(128),
           sync_state VARCHAR(50) NOT NULL,
           source_event VARCHAR(100),
           invoice_id UUID REFERENCES invoices(id) ON DELETE SET NULL,
@@ -279,15 +281,24 @@ export async function initializeDatabaseSchema(): Promise<void> {
           CONSTRAINT uq_merchant_order_sync UNIQUE (merchant_id, order_id)
       );
 
+      ALTER TABLE order_sync_records ADD COLUMN IF NOT EXISTS internal_order_id VARCHAR(128);
+      ALTER TABLE order_sync_records ADD COLUMN IF NOT EXISTS salla_refund_id VARCHAR(128);
+      ALTER TABLE invoices ADD COLUMN IF NOT EXISTS salla_refund_id VARCHAR(128);
+
       CREATE INDEX IF NOT EXISTS idx_order_sync_merchant ON order_sync_records(merchant_id, sync_state);
       CREATE INDEX IF NOT EXISTS idx_order_sync_order ON order_sync_records(order_id);
+      CREATE INDEX IF NOT EXISTS idx_order_sync_internal ON order_sync_records(merchant_id, internal_order_id);
+      CREATE INDEX IF NOT EXISTS idx_order_sync_refund ON order_sync_records(merchant_id, salla_refund_id);
       CREATE INDEX IF NOT EXISTS idx_order_sync_created ON order_sync_records(merchant_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_invoices_refund ON invoices(salla_refund_id);
 
       CREATE TABLE IF NOT EXISTS order_sync_transitions (
           id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
           sync_record_id UUID NOT NULL REFERENCES order_sync_records(id) ON DELETE CASCADE,
           merchant_id VARCHAR(64) NOT NULL,
           order_id VARCHAR(128) NOT NULL,
+          internal_order_id VARCHAR(128),
+          salla_refund_id VARCHAR(128),
           from_state VARCHAR(50),
           to_state VARCHAR(50) NOT NULL,
           source_event VARCHAR(100),
@@ -295,12 +306,17 @@ export async function initializeDatabaseSchema(): Promise<void> {
           invoice_uuid UUID,
           correlation_id VARCHAR(128),
           attempt_number INT NOT NULL DEFAULT 1,
+          recovery_permitted BOOLEAN DEFAULT FALSE,
           reason TEXT,
           error_code VARCHAR(64),
           error_category VARCHAR(64),
           metadata JSONB,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      ALTER TABLE order_sync_transitions ADD COLUMN IF NOT EXISTS internal_order_id VARCHAR(128);
+      ALTER TABLE order_sync_transitions ADD COLUMN IF NOT EXISTS salla_refund_id VARCHAR(128);
+      ALTER TABLE order_sync_transitions ADD COLUMN IF NOT EXISTS recovery_permitted BOOLEAN DEFAULT FALSE;
 
       CREATE INDEX IF NOT EXISTS idx_sync_transitions_rec ON order_sync_transitions(sync_record_id, created_at ASC);
       CREATE INDEX IF NOT EXISTS idx_sync_transitions_order ON order_sync_transitions(merchant_id, order_id);

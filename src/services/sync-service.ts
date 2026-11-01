@@ -30,6 +30,8 @@ export interface OrderSyncRecord {
   id: string;
   merchantId: string;
   orderId: string;
+  internalOrderId?: string | null;
+  sallaRefundId?: string | null;
   syncState: SyncState;
   sourceEvent?: string;
   invoiceId?: string | null;
@@ -62,6 +64,8 @@ export interface OrderSyncTransition {
   syncRecordId: string;
   merchantId: string;
   orderId: string;
+  internalOrderId?: string | null;
+  sallaRefundId?: string | null;
   fromState: SyncState | null;
   toState: SyncState;
   sourceEvent?: string;
@@ -69,6 +73,7 @@ export interface OrderSyncTransition {
   invoiceUuid?: string | null;
   correlationId?: string;
   attemptNumber: number;
+  recoveryPermitted: boolean;
   reason?: string | null;
   errorCode?: string | null;
   errorCategory?: string | null;
@@ -83,6 +88,8 @@ export interface OrderSyncWithTransitions extends OrderSyncRecord {
 export interface SyncTransitionInput {
   merchantId: string;
   orderId: string;
+  internalOrderId?: string | null;
+  sallaRefundId?: string | null;
   toState: SyncState;
   sourceEvent?: string;
   invoiceId?: string | null;
@@ -93,6 +100,7 @@ export interface SyncTransitionInput {
   errorCategory?: string | null;
   reason?: string | null;
   isRecoverable?: boolean;
+  recoveryPermitted?: boolean;
   orderAmount?: number | null;
   orderCurrency?: string;
   customerSummary?: {
@@ -220,6 +228,8 @@ export interface OrderSupportDiagnostics {
     attempts: number;
     firstSeenAt: string;
     lastEventAt: string;
+    internalOrderId?: string | null;
+    sallaRefundId?: string | null;
     invoiceId?: string | null;
     invoiceUuid?: string | null;
     invoiceType?: string | null;
@@ -257,7 +267,9 @@ export async function transitionOrderSyncState(
   const correlationId = input.correlationId || `corr_${input.orderId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
   
   // Compute default nextAction and isRecoverable based on state
-  let isRecoverable = input.isRecoverable !== undefined ? input.isRecoverable : false;
+  let isRecoverable = input.recoveryPermitted !== undefined 
+    ? input.recoveryPermitted 
+    : (input.isRecoverable !== undefined ? input.isRecoverable : false);
   let nextAction = input.nextAction;
 
   if (!nextAction) {
@@ -345,6 +357,8 @@ export async function transitionOrderSyncState(
            customer_summary = COALESCE($14::jsonb, customer_summary),
            eligibility_details = COALESCE($15::jsonb, eligibility_details),
            next_action = $16,
+           internal_order_id = COALESCE($18, internal_order_id),
+           salla_refund_id = COALESCE($19, salla_refund_id),
            last_event_at = NOW(),
            updated_at = NOW()
        WHERE id = $17`,
@@ -365,22 +379,26 @@ export async function transitionOrderSyncState(
         input.customerSummary ? JSON.stringify(input.customerSummary) : null,
         input.eligibilityDetails ? JSON.stringify(input.eligibilityDetails) : null,
         nextAction,
-        syncRecordId
+        syncRecordId,
+        input.internalOrderId || null,
+        input.sallaRefundId || null
       ]
     );
   } else {
     const insertRes = await client.query(
       `INSERT INTO order_sync_records (
-        merchant_id, order_id, sync_state, source_event,
+        merchant_id, order_id, internal_order_id, salla_refund_id, sync_state, source_event,
         invoice_id, invoice_uuid, invoice_type, attempt_count,
         correlation_id, error_code, error_category, reason,
         is_recoverable, order_amount, order_currency, customer_summary,
         eligibility_details, next_action, last_event_at, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17, NOW(), NOW(), NOW())
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18::jsonb, $19, NOW(), NOW(), NOW())
       RETURNING id`,
       [
         input.merchantId,
         input.orderId,
+        input.internalOrderId || null,
+        input.sallaRefundId || null,
         input.toState,
         input.sourceEvent || null,
         input.invoiceId || null,
@@ -404,14 +422,16 @@ export async function transitionOrderSyncState(
   // 2. Append to transition log
   await client.query(
     `INSERT INTO order_sync_transitions (
-      sync_record_id, merchant_id, order_id, from_state, to_state,
-      source_event, invoice_id, invoice_uuid, correlation_id,
-      attempt_number, reason, error_code, error_category, metadata, created_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, NOW())`,
+      sync_record_id, merchant_id, order_id, internal_order_id, salla_refund_id,
+      from_state, to_state, source_event, invoice_id, invoice_uuid, correlation_id,
+      attempt_number, recovery_permitted, reason, error_code, error_category, metadata, created_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, NOW())`,
     [
       syncRecordId,
       input.merchantId,
       input.orderId,
+      input.internalOrderId || null,
+      input.sallaRefundId || null,
       fromState,
       input.toState,
       input.sourceEvent || null,
@@ -419,6 +439,7 @@ export async function transitionOrderSyncState(
       input.invoiceUuid || null,
       correlationId,
       currentAttempts,
+      isRecoverable,
       input.reason || null,
       input.errorCode || null,
       input.errorCategory || null,
@@ -479,6 +500,8 @@ export async function getOrderSyncWithHistory(
     id: row.id,
     merchantId: row.merchant_id,
     orderId: row.order_id,
+    internalOrderId: row.internal_order_id,
+    sallaRefundId: row.salla_refund_id,
     syncState: row.sync_state,
     sourceEvent: row.source_event,
     invoiceId: row.invoice_id,
@@ -503,6 +526,8 @@ export async function getOrderSyncWithHistory(
       syncRecordId: t.sync_record_id,
       merchantId: t.merchant_id,
       orderId: t.order_id,
+      internalOrderId: t.internal_order_id,
+      sallaRefundId: t.salla_refund_id,
       fromState: t.from_state,
       toState: t.to_state,
       sourceEvent: t.source_event,
@@ -510,6 +535,7 @@ export async function getOrderSyncWithHistory(
       invoiceUuid: t.invoice_uuid,
       correlationId: t.correlation_id,
       attemptNumber: Number(t.attempt_number),
+      recoveryPermitted: Boolean(t.recovery_permitted),
       reason: t.reason,
       errorCode: t.error_code,
       errorCategory: t.error_category,
@@ -533,7 +559,7 @@ export async function queryOrderSyncRecords(
   if (options.search) {
     params.push(`%${options.search.trim()}%`);
     const searchIdx = params.length;
-    whereClauses.push(`(order_id ILIKE $${searchIdx} OR id::text ILIKE $${searchIdx} OR invoice_uuid::text ILIKE $${searchIdx})`);
+    whereClauses.push(`(order_id ILIKE $${searchIdx} OR internal_order_id ILIKE $${searchIdx} OR salla_refund_id ILIKE $${searchIdx} OR id::text ILIKE $${searchIdx} OR invoice_uuid::text ILIKE $${searchIdx})`);
   }
 
   if (options.syncState && options.syncState !== 'all') {
@@ -590,6 +616,8 @@ export async function queryOrderSyncRecords(
       id: row.id,
       merchantId: row.merchant_id,
       orderId: row.order_id,
+      internalOrderId: row.internal_order_id,
+      sallaRefundId: row.salla_refund_id,
       syncState: row.sync_state,
       sourceEvent: row.source_event,
       invoiceId: row.invoice_id,
@@ -1220,6 +1248,8 @@ export async function generateOrderSupportDiagnostics(
       attempts: syncWithHist ? syncWithHist.attemptCount : 0,
       firstSeenAt: syncWithHist ? syncWithHist.createdAt.toISOString() : new Date().toISOString(),
       lastEventAt: syncWithHist ? syncWithHist.lastEventAt.toISOString() : new Date().toISOString(),
+      internalOrderId: syncWithHist?.internalOrderId,
+      sallaRefundId: syncWithHist?.sallaRefundId,
       invoiceId: syncWithHist?.invoiceId,
       invoiceUuid: syncWithHist?.invoiceUuid,
       invoiceType: syncWithHist?.invoiceType,

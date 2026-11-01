@@ -144,6 +144,8 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
         await transitionOrderSyncState(client, {
           merchantId,
           orderId,
+          internalOrderId: orderData?.reference_id?.toString() || orderId,
+          sallaRefundId: (payload.data as any)?.refund?.id?.toString() || (payload.data as any)?.refund_id?.toString() || null,
           toState: isAsyncMode ? 'persisted' : 'received',
           sourceEvent: payload.event,
           orderAmount: orderData?.amounts?.total?.amount || null,
@@ -172,8 +174,27 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
         });
       }
 
-      const result = await processSallaWebhookPayload(client, payload);
-      return reply.status(result.statusCode).send(result.body);
+      try {
+        const result = await processSallaWebhookPayload(client, payload);
+        return reply.status(result.statusCode).send(result.body);
+      } catch (procErr: any) {
+        if (orderId && orderId !== '0') {
+          await transitionOrderSyncState(client, {
+            merchantId,
+            orderId,
+            internalOrderId: orderData?.reference_id?.toString() || orderId,
+            sallaRefundId: (payload.data as any)?.refund?.id?.toString() || (payload.data as any)?.refund_id?.toString() || null,
+            toState: 'temporarily_failed',
+            sourceEvent: payload.event,
+            errorCode: 'WEBHOOK_PROCESSING_EXCEPTION',
+            errorCategory: 'system',
+            reason: procErr.message || 'فشل استثنائي أثناء معالجة الحدث',
+            isRecoverable: true,
+            nextAction: 'إعادة المحاولة عبر صفحة سجل المزامنة بعد معالجة الخطأ'
+          }).catch(() => {});
+        }
+        throw procErr;
+      }
     } finally {
       client.release();
     }
@@ -367,8 +388,14 @@ export async function processSallaWebhookPayload(
     };
   }
 
-  const isRefundOrCancel = payload.event === 'order.refunded' || payload.event === 'order.cancelled';
-  const isOrderUpsert = payload.event === 'order.created' || payload.event === 'order.updated';
+  const isRefund = payload.event === 'order.refunded';
+  const isCancel = payload.event === 'order.cancelled';
+  const isRefundOrCancel = isRefund || isCancel;
+  const isOrderUpsert = payload.event === 'order.created' || 
+                        payload.event === 'order.updated' ||
+                        payload.event === 'order.status.updated' ||
+                        payload.event === 'order.payment.updated' ||
+                        payload.event === 'order.shipping.address.updated';
 
   if (!isRefundOrCancel && !isOrderUpsert) {
     const rawData = payload.data as any;
@@ -391,7 +418,14 @@ export async function processSallaWebhookPayload(
 
   const orderData = payload.data as SallaOrderData;
   const orderId = orderData.id.toString();
-  const idempotencyKey = `salla:${merchantId}:${payload.event}:${orderId}:${payload.created_at}`;
+  const internalOrderId = orderData.reference_id?.toString() || orderId;
+  const sallaRefundId = (payload.data as any)?.refund?.id?.toString() ||
+                        (payload.data as any)?.refund_id?.toString() ||
+                        (orderData as any)?.refund_id?.toString() ||
+                        null;
+  const idempotencyKey = sallaRefundId 
+    ? `salla:${merchantId}:${payload.event}:${orderId}:${sallaRefundId}`
+    : `salla:${merchantId}:${payload.event}:${orderId}:${payload.created_at}`;
 
   const existing = await client.query(
     `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status 
@@ -407,6 +441,8 @@ export async function processSallaWebhookPayload(
     await transitionOrderSyncState(client, {
       merchantId,
       orderId,
+      internalOrderId,
+      sallaRefundId,
       toState: isCleared ? 'successfully_cleared' : (isReported ? 'successfully_reported' : 'successfully_processed'),
       sourceEvent: payload.event,
       invoiceId: inv.id,
@@ -467,6 +503,8 @@ export async function processSallaWebhookPayload(
       await transitionOrderSyncState(client, {
         merchantId,
         orderId,
+        internalOrderId,
+        sallaRefundId,
         toState: isCleared ? 'successfully_cleared' : (isReported ? 'successfully_reported' : 'successfully_processed'),
         sourceEvent: payload.event,
         invoiceId: inv.id,
@@ -516,6 +554,7 @@ export async function processSallaWebhookPayload(
         await transitionOrderSyncState(client, {
           merchantId,
           orderId,
+          internalOrderId,
           toState: 'awaiting_processing',
           sourceEvent: payload.event,
           orderAmount: orderData.amounts?.total?.amount || null,
@@ -582,6 +621,7 @@ export async function processSallaWebhookPayload(
         await transitionOrderSyncState(client, {
           merchantId,
           orderId,
+          internalOrderId,
           toState: 'requires_human_review',
           sourceEvent: payload.event,
           errorCode: 'B2B_MISSING_ADDRESS',
@@ -616,6 +656,84 @@ export async function processSallaWebhookPayload(
 
   let result;
   if (isRefundOrCancel) {
+    if (isCancel) {
+      const origRes = await client.query(
+        `SELECT id, uuid, icv, status 
+         FROM invoices 
+         WHERE order_id = $1 AND invoice_type IN ('simplified_tax_invoice', 'tax_invoice')
+         ORDER BY created_at DESC LIMIT 1`,
+        [orderId]
+      );
+
+      if (origRes.rows.length === 0) {
+        await transitionOrderSyncState(client, {
+          merchantId,
+          orderId,
+          internalOrderId,
+          sallaRefundId,
+          toState: 'successfully_processed',
+          sourceEvent: payload.event,
+          orderAmount: orderData.amounts?.total?.amount || null,
+          orderCurrency: orderData.currency || 'SAR',
+          customerSummary: {
+            isB2B: isB2bCustomer(orderData.customer?.tax_number),
+            buyerVat: orderData.customer?.tax_number || undefined,
+            buyerName: orderData.customer?.company_name || `${orderData.customer?.first_name || ''} ${orderData.customer?.last_name || ''}`.trim() || undefined,
+            city: orderData.shipping?.address?.city,
+            country: orderData.shipping?.address?.country || 'SA'
+          },
+          reason: 'تم إلغاء الطلب في سلة قبل التوريد وقبل إصدار أي فاتورة ضريبية، لا يتطلب إصدار إشعار دائن نظاماً (Cancelled Before Supply)',
+          isRecoverable: false
+        }).catch(() => {});
+
+        return {
+          statusCode: 200,
+          body: {
+            status: 'cancelled_before_supply',
+            order_id: orderId,
+            message: 'Order cancelled before invoice issuance. No tax credit note required under KSA VAT regulations.'
+          }
+        };
+      }
+    }
+
+    if (isRefund && sallaRefundId) {
+      const existingRefund = await client.query(
+        `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status
+         FROM invoices
+         WHERE salla_refund_id = $1`,
+        [sallaRefundId]
+      );
+      if (existingRefund.rows.length > 0) {
+        const inv = existingRefund.rows[0];
+        await transitionOrderSyncState(client, {
+          merchantId,
+          orderId,
+          internalOrderId,
+          sallaRefundId,
+          toState: 'successfully_processed',
+          sourceEvent: payload.event,
+          invoiceId: inv.id,
+          invoiceUuid: inv.uuid,
+          invoiceType: 'credit_note',
+          reason: `تمت معالجة استرجاع سلة مسبقاً بإشعار دائن (رقم الاسترجاع: ${sallaRefundId}) دون تكرار`,
+          isRecoverable: false
+        }).catch(() => {});
+
+        return {
+          statusCode: 200,
+          body: {
+            status: 'idempotent_refund_replay',
+            order_id: orderId,
+            refund_id: sallaRefundId,
+            invoice_id: inv.id,
+            invoice_uuid: inv.uuid,
+            icv: inv.icv
+          }
+        };
+      }
+    }
+
     result = await processSallaRefundIntoZatcaCreditNote(
       client,
       egsUnitId,
@@ -623,6 +741,13 @@ export async function processSallaWebhookPayload(
       idempotencyKey,
       payload.event === 'order.cancelled' ? 'Order cancelled by customer or merchant' : 'Order refunded'
     );
+
+    if (sallaRefundId && result.invoiceId) {
+      await client.query(
+        `UPDATE invoices SET salla_refund_id = $1 WHERE id = $2`,
+        [sallaRefundId, result.invoiceId]
+      );
+    }
   } else {
     result = await processSallaOrderIntoZatcaInvoice(
       client,
@@ -635,6 +760,8 @@ export async function processSallaWebhookPayload(
   await transitionOrderSyncState(client, {
     merchantId,
     orderId,
+    internalOrderId,
+    sallaRefundId,
     toState: 'successfully_processed',
     sourceEvent: payload.event,
     invoiceId: result.invoiceId,
@@ -705,11 +832,32 @@ export async function drainWebhookQueue(poolInstance = pool): Promise<{ processe
         processed++;
       } catch (err: any) {
         errors++;
-        const nextStatus = ((row.attempts || 0) + 1) >= 5 ? 'failed' : 'pending';
+        const nextAttempts = (row.attempts || 0) + 1;
+        const nextStatus = nextAttempts >= 5 ? 'failed' : 'pending';
         await client.query(
           `UPDATE webhook_queue SET status = $1, error_message = $2 WHERE id = $3`,
           [nextStatus, err.message, row.id]
         );
+        try {
+          const rawPayload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+          const orderData = rawPayload?.data as any;
+          const orderId = orderData?.id?.toString();
+          if (orderId && orderId !== '0') {
+            await transitionOrderSyncState(client, {
+              merchantId: row.merchant_id,
+              orderId,
+              internalOrderId: orderData?.reference_id?.toString() || orderId,
+              sallaRefundId: rawPayload?.data?.refund?.id?.toString() || rawPayload?.data?.refund_id?.toString() || null,
+              toState: nextAttempts >= 5 ? 'permanently_failed' : 'temporarily_failed',
+              sourceEvent: row.event_name,
+              errorCode: 'WEBHOOK_QUEUE_DRAIN_FAILURE',
+              errorCategory: 'system',
+              reason: err.message || 'فشل في معالجة الحدث من طابور الرسائل المؤجلة',
+              isRecoverable: true,
+              nextAction: nextAttempts >= 5 ? 'طلب استعادة يدوية أو مراجعة الدعم الفني' : 'إعادة محاولة آلية لاحقة'
+            });
+          }
+        } catch {}
       }
     }
   } finally {

@@ -7,8 +7,10 @@ import {
   validateB2bBuyerAddress,
   isExportCustomer,
   resubmitCorrectedZatcaInvoice,
+  remedyRejectedSimplifiedInvoice,
   processSallaOrderIntoZatcaInvoice
 } from '../src/services/invoice-generator.js';
+import { processSallaWebhookPayload } from '../src/routes/salla-webhook.js';
 import { validateZatcaPreflight } from '../src/services/zatca-preflight.js';
 import { SallaOrderData } from '../src/types/salla.js';
 import { attachStatefulRelationalTestDb, generateValidSecp256k1TestCert } from './helpers.js';
@@ -435,6 +437,171 @@ test('Discourse Edge Case 7: Rejected-Document Recovery: Immutable History & Has
 
     assert.equal(doc3.icv, 13, 'Subsequent document must increment ICV to 13');
     assert.equal(doc3.pih, doc2.invoiceHash, 'Subsequent document PIH must reference corrected document hash');
+  } finally {
+    client.release();
+    await pool.end();
+  }
+});
+
+test('Discourse Edge Case 8: Simplified Invoice Rejection (NOT_REPORTED) Remedy: Credit Note 381 Cancellation & Replacement Invoice', async () => {
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
+  try {
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase8');
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const encSec = encryptVaultSecret('sec_test_reject_simplified');
+
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
+      ) VALUES (
+        'salla_demo_store', 'متجر سلة التجريبي', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
+      ) ON CONFLICT (merchant_id) DO UPDATE SET 
+        store_name = EXCLUDED.store_name,
+        vat_number = EXCLUDED.vat_number,
+        crn = EXCLUDED.crn`,
+      [encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
+
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        'salla_demo_store', 'main', 'EGS-DISCOURSE-SIMP-01', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 20, 'INITIAL_HASH_EDGE8',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge8', 'IOS-POS'
+      ) RETURNING id`,
+      [encKey, certPem, encSec]
+    );
+    const egsId = egsRes.rows[0].id;
+
+    // Step 1: Issue original Simplified Invoice (B2C)
+    const baseOrder = createBaseMockOrder();
+    baseOrder.id = 99301;
+    const doc1 = await processSallaOrderIntoZatcaInvoice(client, egsId, baseOrder, 'idemp_simp_reject_01');
+    assert.equal(doc1.icv, 21, 'Original invoice must have ICV 21');
+    assert.equal(doc1.isB2C, true, 'Original invoice must be B2C simplified invoice');
+
+    // Step 2: Mark as rejected_reporting (ZATCA Reporting API returned NOT_REPORTED)
+    await client.query(
+      `UPDATE invoices SET status = 'rejected_reporting' WHERE id = $1`,
+      [doc1.invoiceId]
+    );
+
+    // Step 3: Remedy via Credit Note (381) + Replacement Invoice
+    const remedyResult = await remedyRejectedSimplifiedInvoice(client, doc1.invoiceId);
+
+    // Assert Credit Note
+    assert.ok(remedyResult.creditNote.invoiceId, 'Credit note generated');
+    assert.equal(remedyResult.creditNote.icv, 22, 'Credit note increments ICV to 22');
+    assert.equal(remedyResult.creditNote.pih, doc1.invoiceHash, 'Credit note PIH must point to rejected simplified invoice');
+    assert.ok(remedyResult.creditNote.signedXml.includes('381</cbc:InvoiceTypeCode>'), 'Must be code 381');
+
+    // Assert Replacement Invoice
+    assert.ok(remedyResult.replacementInvoice.invoiceId, 'Replacement invoice generated');
+    assert.notEqual(remedyResult.replacementInvoice.invoiceUuid, doc1.invoiceUuid, 'Replacement invoice must have new UUID');
+    assert.equal(remedyResult.replacementInvoice.icv, 23, 'Replacement invoice increments ICV to 23');
+    assert.equal(remedyResult.replacementInvoice.pih, remedyResult.creditNote.invoiceHash, 'Replacement invoice PIH must point to Credit Note hash');
+  } finally {
+    client.release();
+    await pool.end();
+  }
+});
+
+test('Discourse Edge Case 9: Salla Shipment Event Matrix: shipment.created Holds COD, shipment.updated delivered Triggers', async () => {
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
+  try {
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase9');
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const encSec = encryptVaultSecret('sec_test_shipment');
+
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at, cod_fulfillment_statuses
+      ) VALUES (
+        'salla_shipment_store', 'متجر الشحن التجريبي', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days', '["completed", "delivered"]'::jsonb
+      ) ON CONFLICT (merchant_id) DO UPDATE SET 
+        store_name = EXCLUDED.store_name,
+        vat_number = EXCLUDED.vat_number,
+        crn = EXCLUDED.crn`,
+      [encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
+
+    await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        'salla_shipment_store', 'main', 'EGS-SHIPMENT-01', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 1, 'INITIAL_HASH_EDGE9',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge9', 'IOS-POS'
+      )`,
+      [encKey, certPem, encSec]
+    );
+
+    // 1. shipment.created with shipment_status = 'created' must HOLD, zero tax invoice
+    const shipmentCreatedPayload = {
+      event: 'shipment.created',
+      merchant: 'salla_shipment_store',
+      data: {
+        order_id: '881001',
+        shipment_status: 'created',
+        courier: { name: 'Aramex' }
+      }
+    };
+    const resCreated = await processSallaWebhookPayload(client, shipmentCreatedPayload as any);
+    assert.equal(resCreated.statusCode, 200);
+    assert.equal(resCreated.body.status, 'shipment_tracked', 'shipment.created must track shipment without issuing invoice');
+
+    // 2. shipment.updated with shipment_status = 'shipped' must HOLD
+    const shipmentShippedPayload = {
+      event: 'shipment.updated',
+      merchant: 'salla_shipment_store',
+      data: {
+        order_id: '881001',
+        shipment_status: 'shipped',
+        tracking_number: 'TRACK123456'
+      }
+    };
+    const resShipped = await processSallaWebhookPayload(client, shipmentShippedPayload as any);
+    assert.equal(resShipped.statusCode, 200);
+    assert.equal(resShipped.body.status, 'shipment_tracked', 'In-transit shipment must not issue invoice');
+
+    // 3. shipment.updated with shipment_status = 'delivered' confirms delivery
+    const shipmentDeliveredPayload = {
+      event: 'shipment.updated',
+      merchant: 'salla_shipment_store',
+      data: {
+        order_id: '881001',
+        shipment_status: 'delivered'
+      }
+    };
+    const resDelivered = await processSallaWebhookPayload(client, shipmentDeliveredPayload as any);
+    assert.equal(resDelivered.statusCode, 200);
+    assert.equal(resDelivered.body.status, 'shipment_delivered', 'shipment.updated delivered must confirm physical delivery');
+
+    // 4. order.shipping.address.updated updates address without issuing invoice
+    const addressUpdatePayload = {
+      event: 'order.shipping.address.updated',
+      merchant: 'salla_shipment_store',
+      data: {
+        order_id: '881001',
+        shipping_address: { city: 'Jeddah', street: 'King Road' }
+      }
+    };
+    const resAddress = await processSallaWebhookPayload(client, addressUpdatePayload as any);
+    assert.equal(resAddress.statusCode, 200);
+    assert.equal(resAddress.body.status, 'address_updated', 'Address update must not issue tax document');
   } finally {
     client.release();
     await pool.end();

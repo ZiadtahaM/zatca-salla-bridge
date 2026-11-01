@@ -2170,3 +2170,54 @@ export async function resubmitCorrectedZatcaInvoice(
     overrides
   );
 }
+
+/**
+ * ZATCA Phase 2: Remedy for Simplified Invoice Reporting Rejection (NOT_REPORTED).
+ * Per ZATCA Technical Guidelines FAQ:
+ * An invoice rejected at reporting is invalid. The taxpayer must:
+ * 1. Issue a Credit Note (381) cancelling the invalid invoice in the tax ledger.
+ * 2. Issue a replacement Simplified Tax Invoice with corrected data.
+ * Both documents increment ICV and advance the cryptographic hash chain.
+ */
+export async function remedyRejectedSimplifiedInvoice(
+  client: PoolClient,
+  rejectedInvoiceId: string,
+  correctedOrder?: SallaOrderData,
+  overrides?: ProcessInvoiceOverrides
+): Promise<{ creditNote: GeneratedInvoiceResult; replacementInvoice: GeneratedInvoiceResult }> {
+  const rejectedRes = await client.query(
+    `SELECT i.id, i.uuid, i.egs_unit_id, i.order_id, i.idempotency_key, i.icv, i.invoice_hash,
+            i.status, i.invoice_type, i.signed_xml, i.currency, i.grand_total, u.merchant_id
+     FROM invoices i
+     JOIN egs_units u ON i.egs_unit_id = u.id
+     WHERE i.id = $1`,
+    [rejectedInvoiceId]
+  );
+
+  if (!rejectedRes || rejectedRes.rows.length === 0) {
+    throw new Error(`Invoice ${rejectedInvoiceId} not found`);
+  }
+
+  const rejected = rejectedRes.rows[0];
+  if (rejected.status !== 'rejected_reporting' && rejected.status !== 'rejected') {
+    throw new Error(`Invoice ${rejectedInvoiceId} has status '${rejected.status}'. Only reporting-rejected invoices require cancellation credit note remedy.`);
+  }
+
+  // 1. Issue Credit Note (381) cancelling the invalid invoice in the ledger
+  const creditNote = await processPartialCreditNote(client, rejected.egs_unit_id, {
+    originalInvoiceId: rejected.id,
+    refundAmount: Number(rejected.grand_total),
+    returnReason: 'إلغاء فاتورة ضريبية مبسطة مرفوضة من منصة فاتورة (ZATCA NOT_REPORTED Cancellation)',
+    currency: rejected.currency || 'SAR'
+  });
+
+  // 2. Issue replacement Simplified Tax Invoice
+  const replacementInvoice = await resubmitCorrectedZatcaInvoice(
+    client,
+    rejectedInvoiceId,
+    correctedOrder,
+    overrides
+  );
+
+  return { creditNote, replacementInvoice };
+}

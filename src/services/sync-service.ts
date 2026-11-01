@@ -701,6 +701,12 @@ export function getSyncRulesExplanation(config: MerchantSyncConfig): SyncRulesEx
         behavior: 'عدم أهلية ضريبية (Not Eligible)',
         explanationArabic: 'إلغاء تشغيلي بحت. بما أنه لم تقع واقعة توريد ولم تصدر فاتورة، فلا يجوز نظاماً إصدار إشعار دائن لعدم وجود وعاء ضريبي.',
         explanationEnglish: 'No taxable supply occurred and no invoice was issued. Legally prohibited from generating redundant credit note.'
+      },
+      {
+        condition: 'الطلبات المجانية والترويجية بقيمة صفرية (Zero-Value / Gift Orders)',
+        behavior: 'عدم أهلية ضريبية (Not Eligible)',
+        explanationArabic: 'الطلبات التي لا يترتب عليها أي مقابل مالي أو وعاء ضريبي مستحق يتم وسمها كغير خاضعة للفوترة الضريبية لمنع توليد فواتير بقيم صفرية غير مبررة.',
+        explanationEnglish: 'Zero-value promotional or gift orders with zero taxable consideration are marked not eligible to prevent invalid tax invoices.'
       }
     ],
     statusChangeRules: {
@@ -735,10 +741,13 @@ export function getSyncRulesExplanation(config: MerchantSyncConfig): SyncRulesEx
 
 export async function generateSyncPreview(
   client: PoolClient | Pool,
-  merchantId: string
+  merchantId: string,
+  installationDate?: Date | string
 ): Promise<SyncPreviewResult> {
-  const boundaryDate = new Date();
-  boundaryDate.setDate(boundaryDate.getDate() - 30);
+  const boundaryDate = installationDate ? new Date(installationDate) : new Date();
+  if (!installationDate) {
+    boundaryDate.setDate(boundaryDate.getDate() - 30);
+  }
   const boundaryIso = boundaryDate.toISOString().split('T')[0];
 
   // Inspect existing records in database or generate a representative realistic preview

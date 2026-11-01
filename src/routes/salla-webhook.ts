@@ -391,11 +391,82 @@ export async function processSallaWebhookPayload(
   const isRefund = payload.event === 'order.refunded';
   const isCancel = payload.event === 'order.cancelled';
   const isRefundOrCancel = isRefund || isCancel;
+  const isAddressUpdate = payload.event === 'order.shipping.address.updated';
+  const isShipmentEvent = payload.event === 'shipment.created' || payload.event === 'shipment.updated';
   const isOrderUpsert = payload.event === 'order.created' || 
                         payload.event === 'order.updated' ||
                         payload.event === 'order.status.updated' ||
-                        payload.event === 'order.payment.updated' ||
-                        payload.event === 'order.shipping.address.updated';
+                        payload.event === 'order.payment.updated';
+
+  // 1. Dedicated Shipping Address Change Handling:
+  // Address updates represent logistical modifications and must NEVER trigger tax invoice generation.
+  if (isAddressUpdate) {
+    const rawData = payload.data as any;
+    const addrOrderId = rawData?.id?.toString() || rawData?.order_id?.toString() || '';
+    if (addrOrderId) {
+      await client.query(
+        `UPDATE order_sync_records
+         SET last_event_name = $1,
+             updated_at = NOW()
+         WHERE merchant_id = $2 AND order_id = $3`,
+        [payload.event, merchantId, addrOrderId]
+      ).catch(() => {});
+    }
+    return {
+      statusCode: 200,
+      body: {
+        status: 'address_updated',
+        order_id: addrOrderId,
+        message: 'Order shipping address updated without triggering tax invoice generation'
+      }
+    };
+  }
+
+  // 2. Dedicated Salla Shipment Event Handling:
+  // shipment.updated with status 'delivered' is the verified physical delivery event that fulfills tax point for COD.
+  if (isShipmentEvent) {
+    const rawData = payload.data as any;
+    const shipmentStatus = (rawData?.shipment_status || rawData?.status || '').toString().toLowerCase().trim();
+    const shipmentOrderId = (rawData?.order_id || rawData?.order?.id || '').toString();
+
+    if (!shipmentOrderId) {
+      return {
+        statusCode: 200,
+        body: { status: 'shipment_ignored', message: 'Shipment event missing order_id' }
+      };
+    }
+
+    if (shipmentStatus === 'delivered') {
+      await transitionOrderSyncState(client, {
+        merchantId,
+        orderId: shipmentOrderId,
+        toState: 'awaiting_processing',
+        sourceEvent: payload.event,
+        reason: 'تم تأكيد توصيل الشحنة بنجاح عبر شركة الشحن (Verified Delivery Event)',
+        isRecoverable: true,
+        nextAction: 'جاهز لإصدار الفاتورة الضريبية بعد اكتمال التوصيل الفعلي'
+      }).catch(() => {});
+
+      return {
+        statusCode: 200,
+        body: {
+          status: 'shipment_delivered',
+          order_id: shipmentOrderId,
+          message: 'Verified delivery event recorded; proceeding to tax invoice issuance'
+        }
+      };
+    }
+
+    return {
+      statusCode: 200,
+      body: {
+        status: 'shipment_tracked',
+        order_id: shipmentOrderId,
+        shipment_status: shipmentStatus,
+        message: `Shipment status updated to: ${shipmentStatus}`
+      }
+    };
+  }
 
   if (!isRefundOrCancel && !isOrderUpsert) {
     const rawData = payload.data as any;
@@ -530,25 +601,47 @@ export async function processSallaWebhookPayload(
     const paymentMethod = orderData.payment_method?.toLowerCase() || '';
     const statusSlug = orderData.status?.slug?.toLowerCase() || '';
     const isDeferredPaymentMethod = ['cod', 'cash_on_delivery', 'bank', 'bank_transfer'].includes(paymentMethod);
+    const isPaymentReceived = (orderData.payment_status?.toLowerCase() === 'paid') ||
+                              ((payload.data as any)?.payment_status?.toLowerCase() === 'paid') ||
+                              (payload.event === 'order.payment.updated' && (payload.data as any)?.status?.toLowerCase() === 'paid');
 
-    if (isDeferredPaymentMethod) {
-      let allowedFulfillmentSlugs = ['completed', 'delivered'];
+    // Under Saudi VAT Implementing Regulations Article 53(7)(b) and Article 54:
+    // Online prepaid orders trigger tax invoice issuance on receipt of consideration.
+    // Unpaid deferred orders (Cash on Delivery or unverified Bank Transfer) hold invoice issuance
+    // until verified physical delivery occurs (via shipment.updated or explicitly verified delivery mapping).
+    if (isDeferredPaymentMethod && !isPaymentReceived) {
+      let verifiedDeliveredSlugs = ['completed', 'delivered'];
       try {
         const merchantSettingsRes = await client.query(
-          `SELECT cod_fulfillment_statuses FROM merchant_tokens WHERE merchant_id = $1`,
+          `SELECT cod_fulfillment_statuses, status_event_mapping FROM merchant_tokens WHERE merchant_id = $1`,
           [merchantId]
         );
-        if (merchantSettingsRes.rows.length > 0 && merchantSettingsRes.rows[0].cod_fulfillment_statuses) {
-          const customSlugs = merchantSettingsRes.rows[0].cod_fulfillment_statuses;
-          if (Array.isArray(customSlugs) && customSlugs.length > 0) {
-            allowedFulfillmentSlugs = customSlugs.map((s: string) => String(s).toLowerCase().trim());
+        if (merchantSettingsRes.rows.length > 0) {
+          const mapping = merchantSettingsRes.rows[0].status_event_mapping;
+          if (mapping && typeof mapping === 'object') {
+            for (const [slug, mappedEvent] of Object.entries(mapping)) {
+              if (mappedEvent === 'delivered') {
+                verifiedDeliveredSlugs.push(slug.toLowerCase().trim());
+              }
+            }
+          } else if (merchantSettingsRes.rows[0].cod_fulfillment_statuses) {
+            const customSlugs = merchantSettingsRes.rows[0].cod_fulfillment_statuses;
+            if (Array.isArray(customSlugs)) {
+              for (const s of customSlugs) {
+                const norm = String(s).toLowerCase().trim();
+                const nonDeliveryKeywords = ['pack', 'prep', 'ready', 'pickup', 'progress', 'review', 'hold', 'pend'];
+                if (!nonDeliveryKeywords.some(kw => norm.includes(kw))) {
+                  verifiedDeliveredSlugs.push(norm);
+                }
+              }
+            }
           }
         }
       } catch {
-        // Fallback to standard slugs if table column is pending migration
+        // Fallback to standard verified delivery slugs
       }
 
-      const isFinalizedStatus = allowedFulfillmentSlugs.includes(statusSlug);
+      const isFinalizedStatus = verifiedDeliveredSlugs.includes(statusSlug);
 
       if (!isFinalizedStatus) {
         await transitionOrderSyncState(client, {
@@ -559,9 +652,9 @@ export async function processSallaWebhookPayload(
           sourceEvent: payload.event,
           orderAmount: orderData.amounts?.total?.amount || null,
           orderCurrency: orderData.currency || 'SAR',
-          reason: `طلب دفع عند الاستلام أو حوالة بنكية مؤجل حتى وصول الحالة إلى: ${allowedFulfillmentSlugs.join(' أو ')}`,
+          reason: `طلب دفع عند الاستلام أو حوالة بنكية مؤجل حتى تحقق التوصيل الفعلي أو وصول الحالة إلى: ${verifiedDeliveredSlugs.join(' أو ')}`,
           isRecoverable: false,
-          nextAction: 'بانتظار تغيير حالة الطلب في سلة عند اكتمال التوصيل / Awaiting delivery completion'
+          nextAction: 'بانتظار تأكيد التوصيل الفعلي عبر شركة الشحن أو تحديث الحالة إلى تسليم / Awaiting delivery completion'
         }).catch(() => {});
 
         return {
@@ -571,7 +664,7 @@ export async function processSallaWebhookPayload(
             order_id: orderId,
             payment_method: orderData.payment_method,
             order_status: orderData.status?.slug,
-            reason: `COD and Bank Transfer orders are deferred until status reaches one of: ${allowedFulfillmentSlugs.join(', ')}`
+            reason: `COD and Bank Transfer orders are deferred until status reaches verified delivery: ${verifiedDeliveredSlugs.join(', ')}`
           }
         };
       }
@@ -656,15 +749,15 @@ export async function processSallaWebhookPayload(
 
   let result;
   if (isRefundOrCancel) {
-    if (isCancel) {
-      const origRes = await client.query(
-        `SELECT id, uuid, icv, status 
-         FROM invoices 
-         WHERE order_id = $1 AND invoice_type IN ('simplified_tax_invoice', 'tax_invoice')
-         ORDER BY created_at DESC LIMIT 1`,
-        [orderId]
-      );
+    const origRes = await client.query(
+      `SELECT id, uuid, icv, status, grand_total, subtotal, tax_total, currency 
+       FROM invoices 
+       WHERE order_id = $1 AND invoice_type IN ('simplified_tax_invoice', 'tax_invoice')
+       ORDER BY created_at DESC LIMIT 1`,
+      [orderId]
+    );
 
+    if (isCancel) {
       if (origRes.rows.length === 0) {
         await transitionOrderSyncState(client, {
           merchantId,
@@ -682,7 +775,7 @@ export async function processSallaWebhookPayload(
             city: orderData.shipping?.address?.city,
             country: orderData.shipping?.address?.country || 'SA'
           },
-          reason: 'تم إلغاء الطلب في سلة قبل التوريد وقبل إصدار أي فاتورة ضريبية، لا يتطلب إصدار إشعار دائن نظاماً (Cancelled Before Supply)',
+          reason: 'تم إلغاء الطلب في سلة قبل التوريد وقبل إصدار أي فاتورة ضريبية، لا يتطلب إصدار إشعار دائن نظاماً (Cancelled Before Supply - Articles 40 & 54)',
           isRecoverable: false
         }).catch(() => {});
 
@@ -691,7 +784,7 @@ export async function processSallaWebhookPayload(
           body: {
             status: 'cancelled_before_supply',
             order_id: orderId,
-            message: 'Order cancelled before invoice issuance. No tax credit note required under KSA VAT regulations.'
+            message: 'Order cancelled before invoice issuance and supply. No tax credit note required under Saudi VAT Implementing Regulations Article 40 and Article 54.'
           }
         };
       }
@@ -734,13 +827,31 @@ export async function processSallaWebhookPayload(
       }
     }
 
-    result = await processSallaRefundIntoZatcaCreditNote(
-      client,
-      egsUnitId,
-      orderData,
-      idempotencyKey,
-      payload.event === 'order.cancelled' ? 'Order cancelled by customer or merchant' : 'Order refunded'
-    );
+    const refundPayload = (payload.data as any)?.refund || (payload.data as any)?.refunds?.[0];
+    const explicitRefundAmount = refundPayload?.amount?.amount ? Number(refundPayload.amount.amount) :
+                                 (typeof refundPayload?.amount === 'number' ? refundPayload.amount : null);
+
+    const originalTotal = origRes.rows.length > 0 ? Number(origRes.rows[0].grand_total) : Number(orderData.amounts?.total?.amount || 0);
+
+    if (explicitRefundAmount && explicitRefundAmount > 0 && explicitRefundAmount < originalTotal && origRes.rows.length > 0) {
+      // Partial credit note under Saudi VAT Implementing Regulations Article 40 & Article 54
+      result = await processPartialCreditNote(client, egsUnitId, {
+        originalInvoiceId: origRes.rows[0].id,
+        externalOriginalInvoiceNumber: `INV-${origRes.rows[0].icv}`,
+        externalOriginalUuid: origRes.rows[0].uuid,
+        refundAmount: explicitRefundAmount,
+        returnReason: 'Partial customer refund via Salla',
+        idempotencyKey
+      });
+    } else {
+      result = await processSallaRefundIntoZatcaCreditNote(
+        client,
+        egsUnitId,
+        orderData,
+        idempotencyKey,
+        payload.event === 'order.cancelled' ? 'Order cancelled by customer or merchant' : 'Order refunded'
+      );
+    }
 
     if (sallaRefundId && result.invoiceId) {
       await client.query(

@@ -235,6 +235,17 @@ export function reconcileHalalaRounding(
   };
 }
 
+export interface PrepaymentAdjustment {
+  invoiceId: string; // BT-1: Prepayment invoice reference number / IRN
+  invoiceUuid?: string;
+  issueDate: string; // BT-2: Prepayment issue date (YYYY-MM-DD)
+  issueTime: string; // KSA-25: Prepayment issue time (HH:MM:SSZ)
+  taxableAmount: number; // KSA-31: Prepayment VAT Category Taxable Amount
+  taxAmount: number; // KSA-32: Prepayment VAT Category Tax Amount
+  vatCategory: string; // KSA-33: VAT Category code ('S', 'Z', 'E', 'O')
+  vatRate: number; // KSA-34: Applicable prepayment VAT rate (15.00, 5.00, 0.00)
+}
+
 export interface BuildUblXmlOptions {
   order: SallaOrderData;
   uuid: string;
@@ -255,7 +266,10 @@ export interface BuildUblXmlOptions {
   prepaidAmount?: number;
   advanceInvoiceUuid?: string;
   advanceInvoiceId?: string;
+  advanceInvoiceIssueDate?: string;
+  advanceInvoiceIssueTime?: string;
   isAdvanceInvoice?: boolean;
+  prepaymentAdjustments?: PrepaymentAdjustment[];
 }
 
 export function buildUblXmlFromSallaOrder(options: BuildUblXmlOptions): string {
@@ -340,8 +354,33 @@ export function buildUblXmlFromSallaOrder(options: BuildUblXmlOptions): string {
   const taxExclusiveAmount = reconciliation.taxExclusiveAmount;
   let declaredTaxTotal = reconciliation.taxTotalAmount;
   const grandTotal = reconciliation.grandTotal;
-  const prepaidAmount = options.prepaidAmount || 0;
-  const payableAmount = Number((grandTotal - prepaidAmount).toFixed(2));
+
+  // Resolve Prepayment Adjustments per ZATCA Phase 2 (BT-113, KSA-30=386, KSA-31, KSA-32, KSA-33, KSA-34, BR-CO-16)
+  const prepaymentAdjustments: PrepaymentAdjustment[] = [];
+  if (options.prepaymentAdjustments && options.prepaymentAdjustments.length > 0) {
+    prepaymentAdjustments.push(...options.prepaymentAdjustments);
+  } else if (options.advanceInvoiceId || options.advanceInvoiceUuid || (options.prepaidAmount && options.prepaidAmount > 0)) {
+    const rawPrepaid = options.prepaidAmount || 0;
+    const taxable = Number((rawPrepaid / 1.15).toFixed(2));
+    const tax = Number((rawPrepaid - taxable).toFixed(2));
+    prepaymentAdjustments.push({
+      invoiceId: options.advanceInvoiceId || 'PREPAY-01',
+      invoiceUuid: options.advanceInvoiceUuid || '00000000-0000-0000-0000-000000000000',
+      issueDate: options.advanceInvoiceIssueDate || options.issueDate,
+      issueTime: options.advanceInvoiceIssueTime || options.issueTime,
+      taxableAmount: taxable,
+      taxAmount: tax,
+      vatCategory: 'S',
+      vatRate: 15.00
+    });
+  }
+
+  const totalPrepaidAmount = prepaymentAdjustments.reduce(
+    (sum, adj) => sum + Number((adj.taxableAmount + adj.taxAmount).toFixed(2)),
+    0
+  );
+  const prepaidAmount = options.isAdvanceInvoice ? 0 : (prepaymentAdjustments.length > 0 ? Number(totalPrepaidAmount.toFixed(2)) : (options.prepaidAmount || 0));
+  const payableAmount = Number(Math.max(0, grandTotal - prepaidAmount).toFixed(2));
   const hasGiftVoucher = reconciliation.reconciledLines.some(l => l.taxCategory === 'O');
 
   let allowanceChargeXml = '';
@@ -404,12 +443,58 @@ export function buildUblXmlFromSallaOrder(options: BuildUblXmlOptions): string {
     .join('\n');
 
   let advanceReferenceXml = '';
-  if (options.advanceInvoiceId || options.advanceInvoiceUuid) {
-    advanceReferenceXml = `  <cac:AdditionalDocumentReference>
-    <cbc:ID>${options.advanceInvoiceId || 'PREPAY-01'}</cbc:ID>
-    <cbc:UUID>${options.advanceInvoiceUuid || '00000000-0000-0000-0000-000000000000'}</cbc:UUID>
+  if (prepaymentAdjustments.length > 0 && !options.isAdvanceInvoice) {
+    advanceReferenceXml = prepaymentAdjustments.map(adj => `  <cac:AdditionalDocumentReference>
+    <cbc:ID>${adj.invoiceId}</cbc:ID>
+    <cbc:UUID>${adj.invoiceUuid || '00000000-0000-0000-0000-000000000000'}</cbc:UUID>
+    <cbc:IssueDate>${adj.issueDate}</cbc:IssueDate>
+    <cbc:IssueTime>${adj.issueTime}</cbc:IssueTime>
     <cbc:DocumentTypeCode>386</cbc:DocumentTypeCode>
-  </cac:AdditionalDocumentReference>\n`;
+  </cac:AdditionalDocumentReference>`).join('\n') + '\n';
+  }
+
+  let prepaymentLinesXml = '';
+  if (prepaymentAdjustments.length > 0 && !options.isAdvanceInvoice) {
+    let nextLineId = reconciliation.reconciledLines.length + 1;
+    prepaymentLinesXml = '\n' + prepaymentAdjustments.map((adj) => {
+      const lineId = nextLineId++;
+      return `  <cac:InvoiceLine>
+    <cbc:ID>${lineId}</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="PCE">1.00</cbc:InvoicedQuantity>
+    <cbc:LineExtensionAmount currencyID="${docCurrency}">0.00</cbc:LineExtensionAmount>
+    <cac:DocumentReference>
+      <cbc:ID>${adj.invoiceId}</cbc:ID>
+      <cbc:IssueDate>${adj.issueDate}</cbc:IssueDate>
+      <cbc:IssueTime>${adj.issueTime}</cbc:IssueTime>
+      <cbc:DocumentTypeCode>386</cbc:DocumentTypeCode>
+    </cac:DocumentReference>
+    <cac:Item>
+      <cbc:Name>Prepayment Adjustment / تسوية دفعة مقدمة - ${adj.invoiceId}</cbc:Name>
+      <cac:ClassifiedTaxCategory>
+        <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">${adj.vatCategory}</cbc:ID>
+        <cbc:Percent>${adj.vatRate.toFixed(2)}</cbc:Percent>
+        <cac:TaxScheme>
+          <cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5153">VAT</cbc:ID>
+        </cac:TaxScheme>
+      </cac:ClassifiedTaxCategory>
+    </cac:Item>
+    <cac:Price>
+      <cbc:PriceAmount currencyID="${docCurrency}">0.00</cbc:PriceAmount>
+    </cac:Price>
+    <ext:UBLExtensions>
+      <ext:UBLExtension>
+        <ext:ExtensionContent>
+          <UBLPrepaymentExtension xmlns="urn:zatca:names:specification:ubl:ext:prepayment">
+            <KSA-31 currencyID="${docCurrency}">${adj.taxableAmount.toFixed(2)}</KSA-31>
+            <KSA-32 currencyID="${docCurrency}">${adj.taxAmount.toFixed(2)}</KSA-32>
+            <KSA-33>${adj.vatCategory}</KSA-33>
+            <KSA-34>${adj.vatRate.toFixed(2)}</KSA-34>
+          </UBLPrepaymentExtension>
+        </ext:ExtensionContent>
+      </ext:UBLExtension>
+    </ext:UBLExtensions>
+  </cac:InvoiceLine>`;
+    }).join('\n');
   }
 
   const invoiceTypeCodeNumber = options.isAdvanceInvoice ? '386' : '388';
@@ -527,7 +612,7 @@ ${allowanceChargeXml}${rootTaxTotalsXml}
     <cbc:PrepaidAmount currencyID="${docCurrency}">${prepaidAmount.toFixed(2)}</cbc:PrepaidAmount>
     <cbc:PayableAmount currencyID="${docCurrency}">${payableAmount.toFixed(2)}</cbc:PayableAmount>
   </cac:LegalMonetaryTotal>
-${linesXml}
+${linesXml}${prepaymentLinesXml}
 </Invoice>`;
 }
 
@@ -2006,4 +2091,82 @@ export async function processPartialCreditNote(
     throw err;
   }
   });
+}
+
+/**
+ * Resubmits a corrected transaction following a ZATCA clearance or reporting rejection.
+ *
+ * In accordance with ZATCA Phase 2 Guidelines:
+ * 1. The original rejected document remains strictly immutable in the database (status = 'rejected').
+ * 2. The rejected document's UUID, ICV, and hash MUST NEVER be altered or reused.
+ * 3. The new resubmitted invoice receives a brand new UUID, incremented ICV, current timestamp,
+ *    and its Previous Invoice Hash (PIH) strictly references the preceding generated document
+ *    (which is the hash of the rejected document).
+ */
+export async function resubmitCorrectedZatcaInvoice(
+  client: PoolClient,
+  rejectedInvoiceId: string,
+  correctedOrder?: SallaOrderData,
+  overrides?: ProcessInvoiceOverrides
+): Promise<GeneratedInvoiceResult> {
+  const rejectedRes = await client.query(
+    `SELECT i.id, i.uuid, i.egs_unit_id, i.order_id, i.idempotency_key, i.icv, i.invoice_hash,
+            i.status, i.invoice_type, i.signed_xml, i.currency, u.merchant_id
+     FROM invoices i
+     JOIN egs_units u ON i.egs_unit_id = u.id
+     WHERE i.id = $1`,
+    [rejectedInvoiceId]
+  );
+
+  if (!rejectedRes || rejectedRes.rows.length === 0) {
+    throw new Error(`Rejected invoice ${rejectedInvoiceId} not found`);
+  }
+
+  const rejected = rejectedRes.rows[0];
+  if (rejected.status !== 'rejected' && rejected.status !== 'rejected_reporting') {
+    throw new Error(`Invoice ${rejectedInvoiceId} has status '${rejected.status}'. Only rejected documents can be corrected via new document identity.`);
+  }
+
+  const newIdempotency = `${rejected.idempotency_key}:resubmit:${Date.now()}`;
+
+  let orderToProcess: SallaOrderData;
+  if (correctedOrder) {
+    orderToProcess = correctedOrder;
+  } else {
+    const syncRes = await client.query(
+      `SELECT order_amount, order_currency FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
+      [rejected.merchant_id, rejected.order_id]
+    );
+    const amount = Number(syncRes.rows?.[0]?.order_amount || 115);
+    const currency = syncRes.rows?.[0]?.order_currency || rejected.currency || 'SAR';
+    const subtotal = Number((amount / 1.15).toFixed(2));
+    const tax = Number((amount - subtotal).toFixed(2));
+
+    orderToProcess = {
+      id: Number(rejected.order_id) || 1001,
+      currency,
+      customer: { first_name: 'Customer', email: 'customer@example.com' },
+      items: [
+        {
+          id: 1,
+          name: 'Corrected Item Supply',
+          quantity: 1,
+          price: { amount: subtotal, currency }
+        }
+      ],
+      amounts: {
+        sub_total: { amount: subtotal, currency },
+        tax: { amount: { amount: tax, currency } },
+        total: { amount, currency }
+      }
+    } as any;
+  }
+
+  return await processSallaOrderIntoZatcaInvoice(
+    client,
+    rejected.egs_unit_id,
+    orderToProcess,
+    newIdempotency,
+    overrides
+  );
 }

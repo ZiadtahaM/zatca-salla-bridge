@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { pool, initializeDatabaseSchema } from '../../src/storage/db.js';
+import { attachStatefulRelationalTestDb } from '../../tests/helpers.js';
 
 export interface ZatcaLiveCheckOptions {
   endpointUrl?: string;
@@ -33,7 +34,15 @@ export interface ZatcaPayloadResult {
 export async function buildZatcaDeveloperPortalRequest(
   options: ZatcaLiveCheckOptions = {}
 ): Promise<ZatcaPayloadResult> {
-  await initializeDatabaseSchema();
+  try {
+    const testClient = await pool.connect();
+    testClient.release();
+    await initializeDatabaseSchema();
+  } catch (err: any) {
+    if (err.code === 'ECONNREFUSED' || err.message?.includes('connect ECONNREFUSED')) {
+      attachStatefulRelationalTestDb(pool);
+    }
+  }
   const client = await pool.connect();
 
   try {

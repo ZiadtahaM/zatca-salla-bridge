@@ -48,7 +48,7 @@ before(async () => {
     merchantId,
     accessToken: 'salla_secret_access_token_xyz_999',
     refreshToken: 'salla_secret_refresh_token_xyz_888',
-    expiresInSeconds: 7200,
+    expiresInSeconds: 86400 * 14,
     scope: 'offline_access'
   });
 
@@ -76,6 +76,7 @@ before(async () => {
       model: 'Salla-Zatca-Sync-v1',
       serialNumber: `1-SALLA|2-SYNC|3-${testRunId}`,
       commonName: `TS-SYNC-${testRunId}`,
+      storeName: 'متجر التزامن الذكي للتقنية',
       organizationName: 'متجر التزامن الذكي للتقنية',
       organizationUnitName: 'فرع الرياض الرئيسي',
       vatNumber: '310123456700003',
@@ -87,7 +88,8 @@ before(async () => {
       environment: 'simulation',
       crn: '1010123456'
     },
-    new MockZatcaApiClient()
+    certDir,
+    new MockZatcaApiClient(certPem)
   );
 
   egsUnitId = onboardRes.egsUnitId;

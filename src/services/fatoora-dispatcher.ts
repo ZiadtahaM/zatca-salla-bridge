@@ -15,7 +15,7 @@ export interface FatooraDispatchOptions {
 export interface FatooraDispatchResult {
   invoiceId: string;
   invoiceUuid: string;
-  status: 'cleared' | 'reported' | 'duplicate_recovered' | 'queued_dlq_retry' | 'rejected';
+  status: 'cleared' | 'reported' | 'duplicate_recovered' | 'queued_dlq_retry' | 'rejected' | 'cleared_bypass' | 'rejected_reporting';
   httpStatus?: number;
   clearedXml?: string | null;
   qrCode?: string | null;
@@ -213,6 +213,26 @@ export async function submitInvoiceToFatoora(
     };
   }
 
+  // 2b. HTTP 303 Clearance Bypass / Fallback
+  if (verdict.kind === 'clearance_fallback_303') {
+    const fallbackStatus = isB2B ? 'cleared_bypass' : 'reported';
+    await client.query(
+      `UPDATE invoices
+       SET status = $1,
+           updated_at = NOW()
+       WHERE id = $2`,
+      [fallbackStatus, invoiceId]
+    );
+
+    return {
+      invoiceId,
+      invoiceUuid: row.uuid,
+      status: fallbackStatus,
+      httpStatus: 303,
+      message: `ZATCA clearance redirected or bypassed: ${verdict.redirectLocation || 'standard reporting fallback'}`
+    };
+  }
+
   // 3. Transient failure or gateway outage: route to DLQ with backpressure retry window
   if (verdict.kind === 'outage_retry') {
     const retryDelaySec = verdict.retryAfterSeconds || 30;
@@ -244,17 +264,24 @@ export async function submitInvoiceToFatoora(
   }
 
   // 4. Hard business rejection or authentication failure
+  // In accordance with ZATCA Phase 2:
+  // - Standard B2B clearance rejection (HTTP 400): document is NOT issued to the buyer. Status = 'rejected'.
+  //   The rejected document remains immutable; resubmission creates a new document with new UUID/ICV and PIH = rejected hash.
+  // - Simplified B2C reporting rejection (HTTP 400): document was already delivered to consumer. Status = 'rejected_reporting'.
+  //   Flagged for human review and credit note adjustment under VAT Regulations Articles 40 & 54.
   const rejectionReason =
     verdict.kind === 'auth_error_401'
       ? verdict.reason
       : JSON.stringify((verdict as any).errors || httpResponse.rawBody);
 
+  const rejectionStatus = isB2B ? 'rejected' : 'rejected_reporting';
+
   await client.query(
     `UPDATE invoices
-     SET status = 'rejected',
+     SET status = $1,
          updated_at = NOW()
-     WHERE id = $1`,
-    [invoiceId]
+     WHERE id = $2`,
+    [rejectionStatus, invoiceId]
   );
 
   await recordSubmissionFailure(client, {
@@ -268,7 +295,7 @@ export async function submitInvoiceToFatoora(
   return {
     invoiceId,
     invoiceUuid: row.uuid,
-    status: 'rejected',
+    status: rejectionStatus,
     httpStatus: httpResponse.statusCode,
     errors: (verdict as any).errors,
     message: rejectionReason

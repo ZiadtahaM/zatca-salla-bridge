@@ -5,7 +5,8 @@ export interface SallaTokenPayload {
   merchantId: string;
   accessToken: string;
   refreshToken: string;
-  expiresIn: number;
+  expiresIn?: number;
+  expiresInSeconds?: number;
   scope?: string;
   storeName?: string;
   vatNumber?: string;
@@ -48,7 +49,8 @@ export async function storeSallaMerchantTokens(
 ): Promise<void> {
   const encryptedAccessToken = encryptVaultSecret(payload.accessToken);
   const encryptedRefreshToken = encryptVaultSecret(payload.refreshToken);
-  const expiresAt = new Date(Date.now() + payload.expiresIn * 1000);
+  const expiresInSec = Number(payload.expiresIn ?? payload.expiresInSeconds ?? 7200);
+  const expiresAt = new Date(Date.now() + expiresInSec * 1000);
 
   await client.query(
     `INSERT INTO merchant_tokens (
@@ -81,9 +83,12 @@ export async function storeSallaMerchantTokens(
 
 export async function updateMerchantStoreProfile(
   client: PoolClient | Pool,
-  merchantId: string,
-  profile: { storeName?: string; vatNumber?: string; crn?: string; city?: string }
+  merchantIdOrProfile: string | { merchantId: string; storeName?: string; vatNumber?: string; crn?: string; city?: string },
+  profile?: { storeName?: string; vatNumber?: string; crn?: string; city?: string }
 ): Promise<void> {
+  const merchantId = typeof merchantIdOrProfile === 'string' ? merchantIdOrProfile : merchantIdOrProfile.merchantId;
+  const resolvedProfile = typeof merchantIdOrProfile === 'object' ? merchantIdOrProfile : (profile || {});
+
   await client.query(
     `UPDATE merchant_tokens
      SET store_name = COALESCE($1, store_name),
@@ -92,7 +97,7 @@ export async function updateMerchantStoreProfile(
          city = COALESCE($4, city),
          updated_at = NOW()
      WHERE merchant_id = $5`,
-    [profile.storeName || null, profile.vatNumber || null, profile.crn || null, profile.city || null, merchantId]
+    [resolvedProfile.storeName || null, resolvedProfile.vatNumber || null, resolvedProfile.crn || null, resolvedProfile.city || null, merchantId]
   );
 }
 
@@ -178,8 +183,7 @@ export async function refreshSallaTokenIfNeeded(
     const diffMs = tokens.expiresAt.getTime() - now;
     const twentyFourHoursMs = 24 * 60 * 60 * 1000;
 
-    // If another worker completed the refresh while this worker waited for the advisory lock,
-    // return the fresh token immediately without sending the already-invalidated refresh token to Salla.
+    // Return the existing valid token if not expired or forced and more than 24 hours remain
     if (!force && diffMs > twentyFourHoursMs) {
       return tokens;
     }

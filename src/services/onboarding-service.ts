@@ -52,8 +52,8 @@ export interface ZatcaApiClient {
 export class MockZatcaApiClient implements ZatcaApiClient {
   private mockCertPem: string;
 
-  constructor(mockCertPem: string) {
-    this.mockCertPem = mockCertPem;
+  constructor(mockCertPem?: string) {
+    this.mockCertPem = mockCertPem || process.env.ZATCA_SANDBOX_CERT_PEM || '';
   }
 
   async requestComplianceCsid(_csrBase64: string, _otp: string) {
@@ -259,7 +259,7 @@ export async function onboardEgsUnit(
 
   const csrInput: CsrInput = {
     commonName,
-    organizationName: req.storeName,
+    organizationName: req.storeName || (req as any).organizationName || 'Merchant Store',
     organizationUnit: req.branchId,
     vatNumber: req.vatNumber,
     egsSerial: `SRN-${req.merchantId}-${req.branchId}`,

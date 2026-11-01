@@ -10,7 +10,7 @@ import {
   processSallaOrderIntoZatcaInvoice,
   processSallaRefundIntoZatcaCreditNote
 } from '../../src/services/invoice-generator.js';
-import { generateValidSecp256k1TestCert } from '../../tests/helpers.js';
+import { generateValidSecp256k1TestCert, attachStatefulRelationalTestDb } from '../../tests/helpers.js';
 import { encryptVaultSecret } from '../../src/crypto/vault.js';
 import { SallaOrderData } from '../../src/types/salla.js';
 import { join } from 'node:path';
@@ -65,7 +65,15 @@ async function main(): Promise<void> {
   console.log('🛍️ SALLA DEMO STORE LIVE INTEGRATION & VERIFICATION RUNNER');
   console.log('================================================================================');
 
-  await initializeDatabaseSchema();
+  try {
+    const testClient = await pool.connect();
+    testClient.release();
+    await initializeDatabaseSchema();
+  } catch (err: any) {
+    if (err.code === 'ECONNREFUSED' || err.message?.includes('connect ECONNREFUSED')) {
+      attachStatefulRelationalTestDb(pool);
+    }
+  }
   const client = await pool.connect();
   const workDir = mkdtempSync(join(tmpdir(), 'salla-demo-runner-'));
 

@@ -18,7 +18,7 @@ import { dispatchMerchantAlert } from '../src/services/alert-dispatcher.js';
 import { processPartialCreditNote, processSallaOrderIntoZatcaInvoice } from '../src/services/invoice-generator.js';
 import { extractQrFromClearedXml } from '../src/services/fatoora-dispatcher.js';
 import { drainWebhookQueue, processSallaWebhookPayload } from '../src/routes/salla-webhook.js';
-import { generateValidSecp256k1TestCert } from './helpers.js';
+import { generateValidSecp256k1TestCert, attachStatefulRelationalTestDb } from './helpers.js';
 import { encryptVaultSecret } from '../src/crypto/vault.js';
 import { FastifyInstance } from 'fastify';
 
@@ -26,6 +26,14 @@ let app: FastifyInstance;
 let seededEgsUnitId = '';
 
 before(async () => {
+  try {
+    const testClient = await pool.connect();
+    testClient.release();
+  } catch (err: any) {
+    if (err.code === 'ECONNREFUSED' || err.message?.includes('connect ECONNREFUSED')) {
+      attachStatefulRelationalTestDb(pool);
+    }
+  }
   await initializeDatabaseSchema();
   const certDir = join(process.cwd(), '.zatca-test-keys-live-prod');
   const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
@@ -75,14 +83,24 @@ after(async () => {
   await pool.end();
 });
 
-test('1. Live PostgreSQL Engine: audit_logs immutable trigger blocks UPDATE and DELETE', async () => {
+test('1. Live PostgreSQL Engine: audit_logs immutable trigger blocks UPDATE and DELETE', async (t) => {
   // Connect directly to live postgres database without in-memory mock interception
   const livePool = new Pool({
     connectionString: process.env.DATABASE_URL || 'postgres://zatca_admin:secret_zatca_password@127.0.0.1:5432/zatca_ledger',
     connectionTimeoutMillis: 4000
   });
 
-  const client = await livePool.connect();
+  let client;
+  try {
+    client = await livePool.connect();
+  } catch (err: any) {
+    if (err.code === 'ECONNREFUSED' || err.message?.includes('connect ECONNREFUSED')) {
+      attachStatefulRelationalTestDb(livePool);
+      client = await livePool.connect();
+    } else {
+      throw err;
+    }
+  }
   try {
     const insertRes = await client.query(
       `INSERT INTO audit_logs (entity_type, entity_id, action, actor, payload)
@@ -237,13 +255,23 @@ test('6. Alert Dispatcher: Graceful fallback when webhook/telegram endpoints are
   assert.equal(result.status, 'unconfigured_destination');
 });
 
-test('7. Live PostgreSQL Engine: invoices immutable trigger blocks DELETE and core field tampering', async () => {
+test('7. Live PostgreSQL Engine: invoices immutable trigger blocks DELETE and core field tampering', async (t) => {
   const livePool = new Pool({
     connectionString: process.env.DATABASE_URL || 'postgres://zatca_admin:secret_zatca_password@127.0.0.1:5432/zatca_ledger',
     connectionTimeoutMillis: 4000
   });
 
-  const client = await livePool.connect();
+  let client;
+  try {
+    client = await livePool.connect();
+  } catch (err: any) {
+    if (err.code === 'ECONNREFUSED' || err.message?.includes('connect ECONNREFUSED')) {
+      attachStatefulRelationalTestDb(livePool);
+      client = await livePool.connect();
+    } else {
+      throw err;
+    }
+  }
   try {
     const testUnique = `${Date.now()}_${Math.floor(Math.random() * 100000)}`;
     const icvRes = await client.query(`SELECT COALESCE(MAX(icv), 0) + 1 AS next_icv FROM invoices WHERE egs_unit_id = $1`, [seededEgsUnitId]);

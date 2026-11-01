@@ -95,8 +95,8 @@ export async function fetchSallaOrdersPage(
   if (options.toDate) url.searchParams.set('to_date', options.toDate);
   if (options.status) url.searchParams.set('status', options.status);
 
-  // In test or offline demo environment without real token, return synthetic store orders
-  if (accessToken.includes('demo') || accessToken.includes('test') || process.env.NODE_ENV === 'test') {
+  // In test or offline demo environment without real token and without customFetch, return synthetic store orders
+  if (!options.customFetch && (accessToken.includes('demo') || accessToken.includes('test') || process.env.NODE_ENV === 'test')) {
     return {
       orders: [
         {

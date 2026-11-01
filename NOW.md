@@ -79,3 +79,15 @@ Navigating to /debugger serves the pre-flight testing interface.
 Support remains accessible through WhatsApp.
 Visual screenshot evidence and the downloaded CSV reconciliation file are recorded in the scratch directory.
 
+## Salla Sync Control and Recovery Architecture
+Order recovery is now active.
+The platform manages synchronization across four database tables named order_sync_records, order_sync_transitions, salla_reconciliation_jobs, and salla_reconciliation_discrepancies.
+PostgreSQL enforces composite foreign key indexes across all relations, including idx_invoices_replaces and idx_order_sync_records_invoice.
+Triggers stop tampering.
+Check constraints restrict the lifecycle strictly to thirteen canonical states.
+Perimeter rate limiters restrict recovery traffic to fifteen requests per minute, which defends upstream systems during high volume incidents.
+No duplicate invoices can be generated.
+The engine holds advisory transaction locks during execution, preventing sequence collisions and protecting cryptographic integrity.
+Support exports redact credentials, certificates, and customer identities.
+
+

@@ -192,6 +192,10 @@ export function attachStatefulRelationalTestDb(pool: any): void {
   const merchantSubscriptions: any[] = [];
   const zatcaDlq: any[] = [];
   const auditLogs: any[] = [];
+  const orderSyncRecords: any[] = [];
+  const orderSyncTransitions: any[] = [];
+  const reconciliationJobs: any[] = [];
+  const reconciliationDiscrepancies: any[] = [];
 
   const executeQuery = async (sql: string, params: any[] = []): Promise<{ rows: any[]; rowCount: number }> => {
     const normalized = sql.replace(/\s+/g, ' ').trim();
@@ -217,6 +221,10 @@ export function attachStatefulRelationalTestDb(pool: any): void {
 
     if (normalized.includes('UPDATE audit_logs') || normalized.includes('DELETE FROM audit_logs')) {
       throw new Error('TAMPER_EVIDENT_PROTECTION: UPDATE and DELETE operations are forbidden on audit_logs');
+    }
+
+    if (normalized.includes('UPDATE order_sync_transitions') || normalized.includes('DELETE FROM order_sync_transitions')) {
+      throw new Error('TAMPER_EVIDENT_PROTECTION: UPDATE and DELETE operations are strictly forbidden on order_sync_transitions');
     }
 
     if (normalized.includes('INSERT INTO merchant_tokens')) {
@@ -927,6 +935,236 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         if (params[2] !== undefined) row.is_stalled = params[2];
       }
       return { rows: [], rowCount: row ? 1 : 0 };
+    }
+
+    if (normalized.includes('INSERT INTO order_sync_records')) {
+      if (normalized.includes('VALUES ($1, \'salla_demo_store\'')) {
+        // Multi-row demo seed
+        return { rows: [], rowCount: 5 };
+      }
+      const [
+        merchant_id,
+        order_id,
+        sync_state,
+        source_event,
+        invoice_id,
+        invoice_uuid,
+        invoice_type,
+        correlation_id,
+        error_code,
+        error_category,
+        reason,
+        is_recoverable,
+        order_amount,
+        order_currency,
+        customer_summary,
+        eligibility_details,
+        next_action
+      ] = params;
+      const id = randomUUID();
+      const row = {
+        id,
+        merchant_id,
+        order_id: String(order_id),
+        sync_state,
+        source_event: source_event || null,
+        invoice_id: invoice_id || null,
+        invoice_uuid: invoice_uuid || null,
+        invoice_type: invoice_type || null,
+        attempt_count: 1,
+        correlation_id: correlation_id || null,
+        error_code: error_code || null,
+        error_category: error_category || null,
+        reason: reason || null,
+        is_recoverable: Boolean(is_recoverable),
+        order_amount: order_amount !== undefined ? order_amount : null,
+        order_currency: order_currency || 'SAR',
+        customer_summary: customer_summary ? (typeof customer_summary === 'string' ? JSON.parse(customer_summary) : customer_summary) : null,
+        eligibility_details: eligibility_details ? (typeof eligibility_details === 'string' ? JSON.parse(eligibility_details) : eligibility_details) : null,
+        next_action: next_action || null,
+        last_event_at: new Date(),
+        created_at: new Date(),
+        updated_at: new Date()
+      };
+      orderSyncRecords.push(row);
+      return { rows: [{ id }], rowCount: 1 };
+    }
+
+    if (normalized.includes('UPDATE order_sync_records')) {
+      const id = params[16];
+      const existing = orderSyncRecords.find((r) => r.id === id);
+      if (existing) {
+        existing.sync_state = params[0];
+        if (params[1]) existing.source_event = params[1];
+        existing.invoice_id = params[2];
+        existing.invoice_uuid = params[3];
+        if (params[4]) existing.invoice_type = params[4];
+        existing.attempt_count = params[5];
+        existing.correlation_id = params[6];
+        existing.error_code = params[7];
+        existing.error_category = params[8];
+        existing.reason = params[9];
+        existing.is_recoverable = Boolean(params[10]);
+        if (params[11] !== null && params[11] !== undefined) existing.order_amount = params[11];
+        if (params[12]) existing.order_currency = params[12];
+        if (params[13]) existing.customer_summary = typeof params[13] === 'string' ? JSON.parse(params[13]) : params[13];
+        if (params[14]) existing.eligibility_details = typeof params[14] === 'string' ? JSON.parse(params[14]) : params[14];
+        existing.next_action = params[15];
+        existing.last_event_at = new Date();
+        existing.updated_at = new Date();
+      }
+      return { rows: [], rowCount: existing ? 1 : 0 };
+    }
+
+    if (normalized.includes('FROM order_sync_records')) {
+      if (normalized.includes('COUNT(*)')) {
+        const merchantRows = orderSyncRecords.filter((r) => r.merchant_id === params[0]);
+        if (normalized.includes('FILTER')) {
+          return {
+            rows: [
+              {
+                total: merchantRows.length,
+                successful: merchantRows.filter((r) => ['successfully_cleared', 'successfully_reported', 'successfully_processed'].includes(r.sync_state)).length,
+                review: merchantRows.filter((r) => ['requires_human_review', 'awaiting_processing'].includes(r.sync_state)).length,
+                recoverable: merchantRows.filter((r) => r.is_recoverable).length,
+                failed: merchantRows.filter((r) => ['temporarily_failed', 'permanently_failed'].includes(r.sync_state)).length,
+                ineligible: merchantRows.filter((r) => r.sync_state === 'not_eligible').length
+              }
+            ],
+            rowCount: 1
+          };
+        }
+        return { rows: [{ total: merchantRows.length }], rowCount: 1 };
+      }
+
+      if (normalized.includes('WHERE merchant_id = $1 AND order_id = $2')) {
+        const rows = orderSyncRecords.filter((r) => r.merchant_id === params[0] && String(r.order_id) === String(params[1]));
+        return { rows, rowCount: rows.length };
+      }
+
+      const rows = orderSyncRecords.filter((r) => r.merchant_id === params[0]);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('INSERT INTO order_sync_transitions')) {
+      if (params.length <= 2) {
+        return { rows: [], rowCount: 1 };
+      }
+      const [
+        sync_record_id,
+        merchant_id,
+        order_id,
+        from_state,
+        to_state,
+        source_event,
+        invoice_id,
+        invoice_uuid,
+        correlation_id,
+        attempt_number,
+        reason,
+        error_code,
+        error_category,
+        metadata
+      ] = params;
+      const row = {
+        id: randomUUID(),
+        sync_record_id,
+        merchant_id,
+        order_id: String(order_id),
+        from_state: from_state || null,
+        to_state,
+        source_event: source_event || null,
+        invoice_id: invoice_id || null,
+        invoice_uuid: invoice_uuid || null,
+        correlation_id: correlation_id || null,
+        attempt_number: attempt_number || 1,
+        reason: reason || null,
+        error_code: error_code || null,
+        error_category: error_category || null,
+        metadata: metadata ? (typeof metadata === 'string' ? JSON.parse(metadata) : metadata) : null,
+        created_at: new Date()
+      };
+      orderSyncTransitions.push(row);
+      return { rows: [row], rowCount: 1 };
+    }
+
+    if (normalized.includes('FROM order_sync_transitions')) {
+      const rows = orderSyncTransitions.filter((t) => t.sync_record_id === params[0]);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('INSERT INTO salla_reconciliation_jobs')) {
+      const id = randomUUID();
+      const row = {
+        id,
+        merchant_id: params[0] || 'salla_demo_store',
+        status: 'running',
+        from_date: params[1] || null,
+        to_date: params[2] || null,
+        current_page: 1,
+        total_orders_scanned: 0,
+        discrepancies_found: 0,
+        orders_recovered: 0,
+        started_at: new Date(),
+        completed_at: null,
+        error_message: null
+      };
+      reconciliationJobs.push(row);
+      return { rows: [{ id }], rowCount: 1 };
+    }
+
+    if (normalized.includes('UPDATE salla_reconciliation_jobs')) {
+      const id = params[params.length - 1];
+      const job = reconciliationJobs.find((j) => j.id === id);
+      if (job) {
+        if (normalized.includes("status = 'completed'")) {
+          job.status = 'completed';
+          job.total_orders_scanned = params[0];
+          job.discrepancies_found = params[1];
+          job.completed_at = new Date();
+        } else if (normalized.includes("status = 'failed'")) {
+          job.status = 'failed';
+          job.error_message = params[0];
+          job.completed_at = new Date();
+        } else {
+          job.current_page = params[0];
+          job.total_orders_scanned = params[1];
+          job.discrepancies_found = params[2];
+        }
+      }
+      return { rows: [], rowCount: job ? 1 : 0 };
+    }
+
+    if (normalized.includes('FROM salla_reconciliation_jobs')) {
+      const rows = reconciliationJobs.filter((j) => j.merchant_id === params[0]);
+      if (normalized.includes("status = 'running'")) {
+        const running = rows.filter((j) => j.status === 'running');
+        return { rows: running, rowCount: running.length };
+      }
+      return { rows: rows.slice(-1), rowCount: rows.length ? 1 : 0 };
+    }
+
+    if (normalized.includes('INSERT INTO salla_reconciliation_discrepancies')) {
+      const [job_id, merchant_id, order_id, details, resolution_action] = params;
+      const id = randomUUID();
+      const row = {
+        id,
+        job_id,
+        merchant_id,
+        order_id: String(order_id),
+        discrepancy_type: 'MISSED_INGESTION',
+        details: typeof details === 'string' ? JSON.parse(details) : details,
+        resolution_action,
+        resolved_at: null,
+        created_at: new Date()
+      };
+      reconciliationDiscrepancies.push(row);
+      return { rows: [{ id }], rowCount: 1 };
+    }
+
+    if (normalized.includes('FROM salla_reconciliation_discrepancies')) {
+      const rows = reconciliationDiscrepancies.filter((d) => d.merchant_id === params[0] || d.job_id === params[0]);
+      return { rows, rowCount: rows.length };
     }
 
     return { rows: [], rowCount: 0 };

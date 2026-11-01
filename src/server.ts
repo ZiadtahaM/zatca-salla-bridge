@@ -8,6 +8,7 @@ import { invoicePdfRoutes } from './routes/invoice-pdf-route.js';
 import { vatReturnExportRoutes } from './routes/vat-return-export-route.js';
 import { merchantPortalRoutes } from './routes/merchant-portal-route.js';
 import { standaloneApiRoutes } from './routes/standalone-api-route.js';
+import { syncControlRoutes } from './routes/sync-control-route.js';
 import { pool, initializeDatabaseSchema } from './storage/db.js';
 
 export function buildServer() {
@@ -51,6 +52,7 @@ export function buildServer() {
   app.register(vatReturnExportRoutes);
   app.register(merchantPortalRoutes);
   app.register(standaloneApiRoutes);
+  app.register(syncControlRoutes);
 
   return app;
 }

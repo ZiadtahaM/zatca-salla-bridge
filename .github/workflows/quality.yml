@@ -49,10 +49,24 @@ jobs:
       - name: Build TypeScript Project
         run: npm run build
 
-      - name: Unit & Integration Test Suite (62 Invariant Tests)
+      - name: TypeScript Static Perimeter & Type Check
+        run: npx tsc --noEmit
+
+      - name: Security & Secrets Hygiene Scan
+        run: |
+          echo "Scanning repository for leaked private keys or hardcoded tokens..."
+          ! grep -rn "BEGIN EC PRIVATE KEY" src/
+          ! grep -rn "BEGIN RSA PRIVATE KEY" src/
+
+      - name: Unit & Integration Test Suite (Full Invariant & Sync Tests)
         env:
           DATABASE_URL: postgres://zatca_admin:secret_zatca_password@127.0.0.1:5432/zatca_ledger
         run: npm test
+
+      - name: Salla Sync Control & Safe Recovery Regression Gate
+        env:
+          DATABASE_URL: postgres://zatca_admin:secret_zatca_password@127.0.0.1:5432/zatca_ledger
+        run: node --loader ts-node/esm --test tests/sync-control-and-recovery.test.ts
 
       - name: Master Verification Lever (16 Architecture Gates)
         env:

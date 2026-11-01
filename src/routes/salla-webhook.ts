@@ -19,6 +19,7 @@ import {
   isMerchantSubscriptionActive
 } from '../services/salla-oauth.js';
 import { dispatchMerchantAlert } from '../services/alert-dispatcher.js';
+import { transitionOrderSyncState } from '../services/sync-service.js';
 
 export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post('/webhooks/salla/authorize', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -131,6 +132,29 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
 
     const client = await pool.connect();
     try {
+      if (orderId && orderId !== '0') {
+        const customerSummary = {
+          isB2B: isB2bCustomer(orderData?.customer?.tax_number),
+          buyerVat: orderData?.customer?.tax_number || undefined,
+          buyerName: orderData?.customer?.company_name || `${orderData?.customer?.first_name || ''} ${orderData?.customer?.last_name || ''}`.trim() || undefined,
+          city: orderData?.shipping?.address?.city || undefined,
+          country: orderData?.shipping?.address?.country || 'SA'
+        };
+
+        await transitionOrderSyncState(client, {
+          merchantId,
+          orderId,
+          toState: isAsyncMode ? 'persisted' : 'received',
+          sourceEvent: payload.event,
+          orderAmount: orderData?.amounts?.total?.amount || null,
+          orderCurrency: orderData?.currency || 'SAR',
+          customerSummary,
+          reason: isAsyncMode
+            ? 'تم استقبال الحدث وحفظه في طابور المعالجة الآلي / Queued for async processing'
+            : 'تم استقبال الحدث والتحقق من التوقيع الرقمي / Webhook signature verified'
+        }).catch(() => {});
+      }
+
       if (isAsyncMode) {
         const queueRes = await client.query(
           `INSERT INTO webhook_queue (merchant_id, event_name, idempotency_key, payload, status)
@@ -237,6 +261,18 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
         [pendingRow.id, body.buyer_vat || null, body.company_name || null]
       );
 
+      await transitionOrderSyncState(client, {
+        merchantId: pendingRow.merchant_id,
+        orderId,
+        toState: 'successfully_processed',
+        sourceEvent: 'b2b_enrichment',
+        invoiceId: result.invoiceId,
+        invoiceUuid: result.invoiceUuid,
+        invoiceType: 'tax_invoice',
+        reason: 'تم استكمال العنوان الوطني للشركة وتوقيع الفاتورة الضريبية القياسية بنجاح / Address enriched and signed',
+        isRecoverable: true
+      }).catch(() => {});
+
       return reply.status(200).send({
         status: 'enriched_and_signed',
         order_id: orderId,
@@ -295,6 +331,22 @@ export async function processSallaWebhookPayload(
   // Enforce active subscription check before processing orders
   const subCheck = await isMerchantSubscriptionActive(client, merchantId);
   if (!subCheck.active) {
+    const rawData = payload.data as any;
+    const pendingOrderId = rawData?.id?.toString();
+    if (pendingOrderId) {
+      await transitionOrderSyncState(client, {
+        merchantId,
+        orderId: pendingOrderId,
+        toState: 'temporarily_failed',
+        sourceEvent: payload.event,
+        errorCode: 'SUBSCRIPTION_INACTIVE',
+        errorCategory: 'billing',
+        reason: subCheck.reason || 'اشتراك المتجر غير مفعل في متجر تطبيقات سلة',
+        isRecoverable: true,
+        nextAction: 'تجديد الاشتراك عبر متجر تطبيقات سلة / Renew subscription on Salla App Store'
+      }).catch(() => {});
+    }
+
     if (process.env.ENFORCE_WEBHOOK_402 === 'true' || process.env.NODE_ENV === 'test') {
       return {
         statusCode: 402,
@@ -319,6 +371,18 @@ export async function processSallaWebhookPayload(
   const isOrderUpsert = payload.event === 'order.created' || payload.event === 'order.updated';
 
   if (!isRefundOrCancel && !isOrderUpsert) {
+    const rawData = payload.data as any;
+    const pendingOrderId = rawData?.id?.toString();
+    if (pendingOrderId) {
+      await transitionOrderSyncState(client, {
+        merchantId,
+        orderId: pendingOrderId,
+        toState: 'not_eligible',
+        sourceEvent: payload.event,
+        reason: `حدث غير خاضع للفوترة الضريبية: ${payload.event}`,
+        isRecoverable: false
+      }).catch(() => {});
+    }
     return {
       statusCode: 200,
       body: { message: `Ignored event: ${payload.event}` }
@@ -338,6 +402,19 @@ export async function processSallaWebhookPayload(
 
   if (existing.rows.length > 0) {
     const inv = existing.rows[0];
+    const isCleared = inv.status.startsWith('cleared');
+    const isReported = inv.status.startsWith('reported');
+    await transitionOrderSyncState(client, {
+      merchantId,
+      orderId,
+      toState: isCleared ? 'successfully_cleared' : (isReported ? 'successfully_reported' : 'successfully_processed'),
+      sourceEvent: payload.event,
+      invoiceId: inv.id,
+      invoiceUuid: inv.uuid,
+      reason: 'استجابة مكررة لنفس الحدث تم الرد عليها بالفاتورة الحالية (Idempotent Replay)',
+      isRecoverable: false
+    }).catch(() => {});
+
     return {
       statusCode: 200,
       body: {
@@ -385,6 +462,19 @@ export async function processSallaWebhookPayload(
 
     if (existingOrderInvoice.rows.length > 0) {
       const inv = existingOrderInvoice.rows[0];
+      const isCleared = inv.status.startsWith('cleared');
+      const isReported = inv.status.startsWith('reported');
+      await transitionOrderSyncState(client, {
+        merchantId,
+        orderId,
+        toState: isCleared ? 'successfully_cleared' : (isReported ? 'successfully_reported' : 'successfully_processed'),
+        sourceEvent: payload.event,
+        invoiceId: inv.id,
+        invoiceUuid: inv.uuid,
+        reason: 'الطلب مفوتر مسبقاً في السجل المحلي دون تكرار (Idempotent Replay)',
+        isRecoverable: false
+      }).catch(() => {});
+
       return {
         statusCode: 200,
         body: {
@@ -423,6 +513,18 @@ export async function processSallaWebhookPayload(
       const isFinalizedStatus = allowedFulfillmentSlugs.includes(statusSlug);
 
       if (!isFinalizedStatus) {
+        await transitionOrderSyncState(client, {
+          merchantId,
+          orderId,
+          toState: 'awaiting_processing',
+          sourceEvent: payload.event,
+          orderAmount: orderData.amounts?.total?.amount || null,
+          orderCurrency: orderData.currency || 'SAR',
+          reason: `طلب دفع عند الاستلام أو حوالة بنكية مؤجل حتى وصول الحالة إلى: ${allowedFulfillmentSlugs.join(' أو ')}`,
+          isRecoverable: false,
+          nextAction: 'بانتظار تغيير حالة الطلب في سلة عند اكتمال التوصيل / Awaiting delivery completion'
+        }).catch(() => {});
+
         return {
           statusCode: 200,
           body: {
@@ -477,6 +579,27 @@ export async function processSallaWebhookPayload(
           metadata: { missingFields: validation.missingFields }
         }).catch(() => {});
 
+        await transitionOrderSyncState(client, {
+          merchantId,
+          orderId,
+          toState: 'requires_human_review',
+          sourceEvent: payload.event,
+          errorCode: 'B2B_MISSING_ADDRESS',
+          errorCategory: 'data_validation',
+          orderAmount: orderData.amounts?.total?.amount || null,
+          orderCurrency: orderData.currency || 'SAR',
+          customerSummary: {
+            isB2B: true,
+            buyerVat,
+            buyerName,
+            city: orderData.shipping?.address?.city,
+            country: orderData.shipping?.address?.country || 'SA'
+          },
+          reason: `نقص العنوان الوطني لمشتري الشركات: ${validation.missingFields.join('، ')}`,
+          isRecoverable: true,
+          nextAction: 'استكمال بيانات العنوان الوطني للشركة عبر تبويب فواتير الشركات B2B'
+        }).catch(() => {});
+
         return {
           statusCode: 200,
           body: {
@@ -508,6 +631,30 @@ export async function processSallaWebhookPayload(
       idempotencyKey
     );
   }
+
+  await transitionOrderSyncState(client, {
+    merchantId,
+    orderId,
+    toState: 'successfully_processed',
+    sourceEvent: payload.event,
+    invoiceId: result.invoiceId,
+    invoiceUuid: result.invoiceUuid,
+    invoiceType: isRefundOrCancel ? 'credit_note' : (result.isB2C ? 'simplified_tax_invoice' : 'tax_invoice'),
+    orderAmount: orderData.amounts?.total?.amount || null,
+    orderCurrency: orderData.currency || 'SAR',
+    customerSummary: {
+      isB2B: isB2bCustomer(orderData.customer?.tax_number),
+      buyerVat: orderData.customer?.tax_number || undefined,
+      buyerName: orderData.customer?.company_name || `${orderData.customer?.first_name || ''} ${orderData.customer?.last_name || ''}`.trim() || undefined,
+      city: orderData.shipping?.address?.city,
+      country: orderData.shipping?.address?.country || 'SA'
+    },
+    reason: isRefundOrCancel
+      ? `تم إصدار إشعار دائن مشفر كود 381 بنجاح برقم تسلسلي (${result.icv})`
+      : `تم إصدار وتوقيع الفاتورة مشفرة بنجاح برقم تسلسلي (${result.icv})`,
+    isRecoverable: true,
+    nextAction: result.isB2C ? 'بانتظار التقرير خلال 24 ساعة لهيئة الزكاة' : 'بانتظار الاعتماد الفوري'
+  }).catch(() => {});
 
   return {
     statusCode: 200,

@@ -8,6 +8,7 @@ import {
   isExportCustomer,
   resubmitCorrectedZatcaInvoice,
   remedyRejectedSimplifiedInvoice,
+  resubmitSimplifiedInvoiceForReporting,
   processSallaOrderIntoZatcaInvoice
 } from '../src/services/invoice-generator.js';
 import { processSallaWebhookPayload } from '../src/routes/salla-webhook.js';
@@ -558,35 +559,39 @@ test('Discourse Edge Case 9: Salla Shipment Event Matrix: shipment.created Holds
       [encKey, certPem, encSec]
     );
 
-    // 1. shipment.created with shipment_status = 'created' must HOLD, zero tax invoice
+    // 1. shipment.created in creating status with empty labels: must HOLD, zero tax invoice
     const shipmentCreatedPayload = {
       event: 'shipment.created',
       merchant: 'salla_shipment_store',
       data: {
         order_id: '881001',
-        shipment_status: 'created',
+        shipment_status: 'creating',
+        labels: [],
         courier: { name: 'Aramex' }
       }
     };
     const resCreated = await processSallaWebhookPayload(client, shipmentCreatedPayload as any);
     assert.equal(resCreated.statusCode, 200);
-    assert.equal(resCreated.body.status, 'shipment_tracked', 'shipment.created must track shipment without issuing invoice');
+    assert.equal(resCreated.body.status, 'shipment_tracked', 'shipment.created with empty labels must track shipment without issuing invoice');
 
-    // 2. shipment.updated with shipment_status = 'shipped' triggers commencement of transportation tax point
-    const shipmentShippedPayload = {
+    // 2. shipment.updated with in_transit (June 2025 Salla API) & actual_picked_up_at verified handover timestamp
+    // Triggers commencement of transportation tax point under GCC Unified VAT Agreement Article 23(2)(b) & KSA VAT Regs Article 27
+    const shipmentInTransitPayload = {
       event: 'shipment.updated',
       merchant: 'salla_shipment_store',
       data: {
         order_id: '881001',
-        shipment_status: 'shipped',
+        shipment_status: 'in_transit',
+        actual_picked_up_at: '2026-11-07T14:30:00Z',
         tracking_number: 'TRACK123456'
       }
     };
-    const resShipped = await processSallaWebhookPayload(client, shipmentShippedPayload as any);
-    assert.equal(resShipped.statusCode, 200);
-    assert.equal(resShipped.body.status, 'shipment_dispatched', 'Commencement of transport qualifies as date of supply under Art 19(1)(a)');
+    const resInTransit = await processSallaWebhookPayload(client, shipmentInTransitPayload as any);
+    assert.equal(resInTransit.statusCode, 200);
+    assert.equal(resInTransit.body.status, 'shipment_dispatched', 'Commencement of transport qualifies as date of supply under GCC Agreement Art 23(2)(b) & KSA VAT Regs Art 27');
+    assert.equal(resInTransit.body.actual_picked_up_at, '2026-11-07T14:30:00Z', 'Must preserve verified carrier pickup timestamp');
 
-    // 3. shipment.updated with shipment_status = 'delivered' confirms delivery
+    // 3. shipment.updated with shipment_status = 'delivered' confirms physical delivery
     const shipmentDeliveredPayload = {
       event: 'shipment.updated',
       merchant: 'salla_shipment_store',
@@ -680,6 +685,40 @@ test('Discourse Edge Case 10: Article 66 Statutory Infrastructure Compliance: 6-
     assert.equal(invoiceRecord.uuid, invoiceDoc.invoiceUuid);
     assert.ok(invoiceRecord.created_at, 'Invoice must carry immutable timestamp for 6-year retention tracking');
 
+    // Article 66(1) Retention Calculation:
+    // Under Saudi VAT Implementing Regulations Article 66(1):
+    // Ordinary retention runs 6 years from the END of the relevant tax period (not raw creation date).
+    // Capital assets require retention for the adjustment period (10 years) + 5 years from acquisition date.
+    function calculateArticle66RetentionDeadline(issueDate: Date, filerType: 'monthly' | 'quarterly', isCapitalAsset = false): Date {
+      if (isCapitalAsset) {
+        const deadline = new Date(issueDate);
+        deadline.setFullYear(deadline.getFullYear() + 15);
+        return deadline;
+      }
+      const year = issueDate.getUTCFullYear();
+      const month = issueDate.getUTCMonth();
+      let periodEnd: Date;
+      if (filerType === 'monthly') {
+        periodEnd = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59, 999));
+      } else {
+        const quarterEndMonth = Math.floor(month / 3) * 3 + 2;
+        periodEnd = new Date(Date.UTC(year, quarterEndMonth + 1, 0, 23, 59, 59, 999));
+      }
+      const retentionEnd = new Date(periodEnd);
+      retentionEnd.setFullYear(retentionEnd.getFullYear() + 6);
+      return retentionEnd;
+    }
+
+    const testDate = new Date('2026-05-14T10:00:00Z');
+    const monthlyDeadline = calculateArticle66RetentionDeadline(testDate, 'monthly');
+    assert.equal(monthlyDeadline.toISOString().slice(0, 10), '2032-05-31', 'Monthly filer 6-year retention runs from end of May 2026');
+
+    const quarterlyDeadline = calculateArticle66RetentionDeadline(testDate, 'quarterly');
+    assert.equal(quarterlyDeadline.toISOString().slice(0, 10), '2032-06-30', 'Quarterly filer 6-year retention runs from end of Q2 2026');
+
+    const capitalAssetDeadline = calculateArticle66RetentionDeadline(testDate, 'quarterly', true);
+    assert.equal(capitalAssetDeadline.toISOString().slice(0, 10), '2041-05-14', 'Capital asset retention runs 15 years from acquisition');
+
     // 4. Immutability Invariant: Updates to core financial data and deletion must be strictly blocked
     await assert.rejects(
       async () => {
@@ -700,6 +739,147 @@ test('Discourse Edge Case 10: Article 66 Statutory Infrastructure Compliance: 6-
         return true;
       }
     );
+  } finally {
+    client.release();
+    await pool.end();
+  }
+});
+
+test('Discourse Edge Case 11: Ordinary Simplified Reporting Rejection Resubmission (No Duplicate Buyer Invoice) vs NOT_REPORTED Remedy', async () => {
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
+  try {
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase11');
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const encSec = encryptVaultSecret('sec_test_edge11');
+
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
+      ) VALUES (
+        'salla_rejection_store', 'متجر معالجة الرفض', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
+      ) ON CONFLICT (merchant_id) DO UPDATE SET store_name = EXCLUDED.store_name`,
+      [encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
+
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        'salla_rejection_store', 'main', 'EGS-REJECT-01', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 10, 'INITIAL_HASH_EDGE11',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge11', 'IOS-POS'
+      ) RETURNING id`,
+      [encKey, certPem, encSec]
+    );
+    const egsId = egsRes.rows[0].id;
+
+    // 1. Generate an initial simplified invoice (issued and given to buyer)
+    const order1 = createBaseMockOrder();
+    order1.id = 883001;
+    const inv1 = await processSallaOrderIntoZatcaInvoice(client, egsId, order1, 'idemp_rej_01');
+
+    // Simulate technical reporting rejection by ZATCA reporting API
+    await client.query(`UPDATE invoices SET status = 'rejected_reporting' WHERE id = $1`, [inv1.invoiceId]);
+
+    // Scenario A: Ordinary reporting rejection
+    // Under ZATCA FAQ: The taxpayer corrects technical transmission error and resubmits for reporting.
+    // Generally NO NEED to issue another invoice to the buyer!
+    const resubmitRes = await resubmitSimplifiedInvoiceForReporting(client, inv1.invoiceId);
+    assert.equal(resubmitRes.status, 'resubmitted_for_reporting');
+    assert.equal(resubmitRes.invoiceId, inv1.invoiceId, 'Must preserve original invoice identity without creating duplicate buyer document');
+
+    const updatedInv = await client.query(`SELECT status FROM invoices WHERE id = $1`, [inv1.invoiceId]);
+    assert.equal(updatedInv.rows[0].status, 'submitted', 'Status updated to submitted for reporting retry');
+
+    // Scenario B: ZATCA Reporting API returns NOT_REPORTED
+    // Under ZATCA FAQ: Invoice is deemed invalid; taxpayer cancels via Credit Note 381 and generates replacement invoice
+    await client.query(`UPDATE invoices SET status = 'rejected_reporting' WHERE id = $1`, [inv1.invoiceId]);
+    const remedyRes = await remedyRejectedSimplifiedInvoice(client, inv1.invoiceId);
+    assert.ok(remedyRes.creditNote, 'Must generate Credit Note 381 cancelling invalid invoice');
+    assert.ok(remedyRes.replacementInvoice, 'Must generate fresh replacement invoice');
+    assert.equal(remedyRes.creditNote.icv, 12, 'Credit note advances ICV');
+    assert.equal(remedyRes.replacementInvoice.icv, 13, 'Replacement invoice advances ICV');
+  } finally {
+    client.release();
+    await pool.end();
+  }
+});
+
+test('Discourse Edge Case 12: VAT Return Box 1 Inclusion Invariant: Unreported and Rejected Invoices Maintain Tax Liability', async () => {
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
+  try {
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase12');
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const encSec = encryptVaultSecret('sec_test_edge12');
+
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
+      ) VALUES (
+        'salla_vat_liability_store', 'شركة المحاسبة الضريبية', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
+      ) ON CONFLICT (merchant_id) DO UPDATE SET store_name = EXCLUDED.store_name`,
+      [encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
+
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        'salla_vat_liability_store', 'main', 'EGS-VAT-01', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 20, 'INITIAL_HASH_EDGE12',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge12', 'IOS-POS'
+      ) RETURNING id`,
+      [encKey, certPem, encSec]
+    );
+    const egsId = egsRes.rows[0].id;
+
+    // Issue invoice 1: successfully reported
+    const order1 = createBaseMockOrder();
+    order1.id = 884001;
+    const inv1 = await processSallaOrderIntoZatcaInvoice(client, egsId, order1, 'idemp_vat_01');
+    await client.query(`UPDATE invoices SET status = 'reported' WHERE id = $1`, [inv1.invoiceId]);
+
+    // Issue invoice 2: technical rejection from FATOORA reporting
+    const order2 = createBaseMockOrder();
+    order2.id = 884002;
+    const inv2 = await processSallaOrderIntoZatcaInvoice(client, egsId, order2, 'idemp_vat_02');
+    await client.query(`UPDATE invoices SET status = 'rejected_reporting' WHERE id = $1`, [inv2.invoiceId]);
+
+    // Issue invoice 3: pending reporting submission (e.g. within 24h window)
+    const order3 = createBaseMockOrder();
+    order3.id = 884003;
+    const inv3 = await processSallaOrderIntoZatcaInvoice(client, egsId, order3, 'idemp_vat_03');
+    await client.query(`UPDATE invoices SET status = 'signed' WHERE id = $1`, [inv3.invoiceId]);
+
+    // Query VAT export aggregation across the merchant's issued invoices
+    const vatRes = await client.query(
+      `SELECT
+         COUNT(*) as total_invoices,
+         SUM(subtotal) as total_net,
+         SUM(tax_total) as total_vat,
+         COUNT(CASE WHEN status NOT IN ('cleared', 'reported', 'cleared_with_warnings', 'reported_with_warnings') THEN 1 END) as pending_or_rejected_count
+       FROM invoices
+       WHERE egs_unit_id = $1`,
+      [egsId]
+    );
+
+    const agg = vatRes.rows[0];
+    assert.equal(Number(agg.total_invoices), 3, 'All 3 issued invoices exist in ledger');
+    assert.equal(Number(agg.total_net), 600.00, 'All 3 invoices contribute to Box 1 Net Sales');
+    assert.equal(Number(agg.total_vat), 90.00, 'All 3 invoices contribute to Output VAT liability');
+    assert.equal(Number(agg.pending_or_rejected_count), 2, 'Tracks 2 invoices as pending/unreported without altering VAT liability');
   } finally {
     client.release();
     await pool.end();

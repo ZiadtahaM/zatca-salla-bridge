@@ -2221,3 +2221,40 @@ export async function remedyRejectedSimplifiedInvoice(
 
   return { creditNote, replacementInvoice };
 }
+
+/**
+ * ZATCA Phase 2: Resubmission for Ordinary Simplified Reporting Rejection.
+ * Per ZATCA Technical Guidelines FAQ:
+ * If a simplified tax invoice is rejected during reporting (within the 24-hour window),
+ * the taxpayer must correct the technical error and resubmit the document for reporting.
+ * There is generally NO NEED to issue another invoice to the buyer, because the buyer
+ * already holds a valid simplified tax invoice issued at point of sale / delivery.
+ */
+export async function resubmitSimplifiedInvoiceForReporting(
+  client: PoolClient,
+  invoiceId: string
+): Promise<{ invoiceId: string; invoiceUuid: string; status: string; message: string }> {
+  const invRes = await client.query(
+    `SELECT id, uuid, invoice_type, status, signed_xml FROM invoices WHERE id = $1`,
+    [invoiceId]
+  );
+  if (!invRes || invRes.rows.length === 0) {
+    throw new Error(`Invoice ${invoiceId} not found`);
+  }
+  const inv = invRes.rows[0];
+  if (inv.invoice_type !== 'simplified_tax_invoice') {
+    throw new Error(`Invoice ${invoiceId} is not a simplified tax invoice`);
+  }
+
+  await client.query(
+    `UPDATE invoices SET status = 'submitted', updated_at = NOW() WHERE id = $1`,
+    [invoiceId]
+  );
+
+  return {
+    invoiceId: inv.id,
+    invoiceUuid: inv.uuid,
+    status: 'resubmitted_for_reporting',
+    message: 'Simplified invoice re-queued for reporting transmission without issuing duplicate invoice to buyer'
+  };
+}

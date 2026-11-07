@@ -918,6 +918,27 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       };
     }
 
+    if (normalized.includes('FROM invoices WHERE egs_unit_id = $1')) {
+      const filtered = invoices.filter((i) => i.egs_unit_id === params[0]);
+      if (normalized.includes('COUNT(*)') && normalized.includes('SUM(')) {
+        const totalNet = filtered.reduce((acc, i) => acc + (Number(i.subtotal) || 0), 0);
+        const totalVat = filtered.reduce((acc, i) => acc + (Number(i.tax_total) || 0), 0);
+        const pendingOrRejected = filtered.filter(i => !['cleared', 'reported', 'cleared_with_warnings', 'reported_with_warnings'].includes(i.status)).length;
+        return {
+          rows: [
+            {
+              total_invoices: filtered.length,
+              total_net: totalNet,
+              total_vat: totalVat,
+              pending_or_rejected_count: pendingOrRejected
+            }
+          ],
+          rowCount: 1
+        };
+      }
+      return { rows: filtered, rowCount: filtered.length };
+    }
+
     if (normalized.includes('SELECT * FROM invoices ORDER BY created_at ASC') || normalized.includes('SELECT * FROM invoices')) {
       return { rows: invoices, rowCount: invoices.length };
     }

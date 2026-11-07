@@ -423,14 +423,19 @@ export async function processSallaWebhookPayload(
   }
 
   // 2. Dedicated Salla Shipment Event Handling:
-  // Under Saudi VAT Implementing Regulations Article 19(1)(a) & Online Sales Guidelines:
-  // For goods supplied with transportation, the date of supply is the commencement of transportation.
-  // Both shipment commencement ('shipped', 'dispatched', 'in_transit') and final physical delivery ('delivered')
-  // qualify as valid tax point events, while shipment creation ('created', label generated) remains tracked on hold.
+  // Under Article 23(1) and Article 23(2)(b) of the GCC Unified VAT Agreement,
+  // and Saudi VAT Implementing Regulations Article 27:
+  // For supplies of goods involving transportation or dispatch, the date of supply
+  // is when transportation or dispatch begins.
+  // Both verified carrier pickup (e.g. Salla actual_picked_up_at or official in_transit status)
+  // and final physical delivery ('delivered') qualify as valid tax point triggers.
+  // Conversely, shipment creation (shipment.created, which may return creating status with empty labels)
+  // does not establish physical handover and remains tracked on deferred hold.
   if (isShipmentEvent) {
     const rawData = payload.data as any;
     const shipmentStatus = (rawData?.shipment_status || rawData?.status || '').toString().toLowerCase().trim();
     const shipmentOrderId = (rawData?.order_id || rawData?.order?.id || '').toString();
+    const actualPickedUpAt = rawData?.actual_picked_up_at || rawData?.shipment?.actual_picked_up_at || null;
 
     if (!shipmentOrderId) {
       return {
@@ -439,13 +444,14 @@ export async function processSallaWebhookPayload(
       };
     }
 
-    const isTransportCommenced = ['shipped', 'dispatched', 'in_transit'].includes(shipmentStatus);
+    const isTransportCommenced = shipmentStatus === 'in_transit' || !!actualPickedUpAt || shipmentStatus === 'shipped' || shipmentStatus === 'dispatched';
     const isDeliveryCompleted = shipmentStatus === 'delivered';
 
     if (isDeliveryCompleted || isTransportCommenced) {
+      const pickupDetail = actualPickedUpAt ? ` (Carrier Handover Confirmed at ${actualPickedUpAt})` : '';
       const reason = isDeliveryCompleted
         ? 'تم تأكيد توصيل الشحنة بنجاح عبر شركة الشحن (Verified Delivery Event)'
-        : 'تم بدء نقل البضاعة عبر شركة الشحن (Commencement of Transportation Tax Point)';
+        : `تم بدء نقل البضاعة عبر شركة الشحن${pickupDetail} (Commencement of Transportation Tax Point - GCC Agreement Art 23(2)(b) & KSA VAT Regs Art 27)`;
       const nextAction = isDeliveryCompleted
         ? 'جاهز لإصدار الفاتورة الضريبية بعد اكتمال التوصيل الفعلي'
         : 'جاهز لإصدار الفاتورة الضريبية عند بدء نقل البضاعة المنقولة';
@@ -465,6 +471,7 @@ export async function processSallaWebhookPayload(
         body: {
           status: isDeliveryCompleted ? 'shipment_delivered' : 'shipment_dispatched',
           order_id: shipmentOrderId,
+          actual_picked_up_at: actualPickedUpAt,
           message: `${reason}; proceeding to tax invoice issuance`
         }
       };
@@ -476,7 +483,7 @@ export async function processSallaWebhookPayload(
         status: 'shipment_tracked',
         order_id: shipmentOrderId,
         shipment_status: shipmentStatus,
-        message: `Shipment status updated to: ${shipmentStatus}`
+        message: `Shipment record tracked in Salla (status: ${shipmentStatus || 'created'}, carrier handover pending, COD held)`
       }
     };
   }
@@ -618,10 +625,12 @@ export async function processSallaWebhookPayload(
                               ((payload.data as any)?.payment_status?.toLowerCase() === 'paid') ||
                               (payload.event === 'order.payment.updated' && (payload.data as any)?.status?.toLowerCase() === 'paid');
 
-    // Under Saudi VAT Implementing Regulations Article 53(7)(b) and Article 54:
-    // Online prepaid orders trigger tax invoice issuance on receipt of consideration.
+    // Under Article 23(1) and Article 23(2)(b) of the GCC Unified VAT Agreement:
+    // VAT becomes due on the earliest applicable date of supply, invoice issuance, or receipt of consideration (to extent received).
+    // Under Saudi VAT Implementing Regulations Article 53(1)(a)(2) and Article 53(7)(a)(2) & (b):
+    // Consideration received before supply triggers immediate tax invoice issuance.
     // Unpaid deferred orders (Cash on Delivery or unverified Bank Transfer) hold invoice issuance
-    // until verified physical delivery occurs (via shipment.updated or explicitly verified delivery mapping).
+    // until transportation commences (Saudi VAT Regs Article 27) or physical delivery is verified.
     if (isDeferredPaymentMethod && !isPaymentReceived) {
       let verifiedDeliveredSlugs = ['completed', 'delivered'];
       try {

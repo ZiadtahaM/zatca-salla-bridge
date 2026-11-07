@@ -26,8 +26,8 @@ ALTER TABLE merchant_tokens ADD COLUMN IF NOT EXISTS status_event_mapping JSONB;
 
 ALTER TABLE webhook_queue ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_order_original 
-ON invoices(egs_unit_id, order_id) 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_order_original
+ON invoices(egs_unit_id, order_id)
 WHERE invoice_type IN ('tax_invoice', 'simplified_tax_invoice');
 
 CREATE INDEX IF NOT EXISTS idx_invoices_replaces ON invoices(replaces_invoice_id);

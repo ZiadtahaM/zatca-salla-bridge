@@ -250,10 +250,14 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       }
 
       if (params.length === 2) {
-        merchant_id = 'salla_demo_store';
-        store_name = 'متجر سلة التجريبي';
-        vat_number = '300075588700003';
-        crn = '1010010000';
+        const idMatch = sql.match(/VALUES\s*\(\s*'([^']+)'/i);
+        merchant_id = idMatch ? idMatch[1] : 'salla_demo_store';
+        const storeMatch = sql.match(/'([^']*(?:مؤسسة|شركة|متجر)[^']*)'/i);
+        store_name = storeMatch ? storeMatch[1] : 'متجر سلة التجريبي';
+        const vatMatch = sql.match(/'(3\d{13}3)'/);
+        vat_number = vatMatch ? vatMatch[1] : '300075588700003';
+        const crnMatch = sql.match(/'(1010\d{6})'/);
+        crn = crnMatch ? crnMatch[1] : '1010010000';
         access_token_encrypted = params[0];
         refresh_token_encrypted = params[1];
       } else if (params.length === 3) {
@@ -408,9 +412,11 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       let branch_name_param: any = null;
 
       if (params.length === 3) {
-        merchant_id = 'salla_demo_store';
-        branch_id = 'riyadh_hq';
-        custom_id = 'live_prod_test_unit';
+        const mMatch = sql.match(/VALUES\s*\(\s*'([^']+)'/i);
+        merchant_id = mMatch ? mMatch[1] : 'salla_demo_store';
+        const bMatch = sql.match(/VALUES\s*\([^,]+,\s*'([^']+)',\s*'([^']+)'/i);
+        branch_id = bMatch ? bMatch[1] : 'riyadh_hq';
+        custom_id = bMatch ? bMatch[2] : 'live_prod_test_unit';
         const icvMatch = sql.match(/TRUE,\s*(\d+)/i);
         if (icvMatch) {
           current_icv = Number(icvMatch[1]);

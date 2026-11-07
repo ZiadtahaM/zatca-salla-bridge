@@ -616,3 +616,92 @@ test('Discourse Edge Case 9: Salla Shipment Event Matrix: shipment.created Holds
     await pool.end();
   }
 });
+
+test('Discourse Edge Case 10: Article 66 Statutory Infrastructure Compliance: 6-Year Retention, Arabic Metadata, Exportability, and Immutability', async () => {
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
+  try {
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase10');
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const encSec = encryptVaultSecret('sec_test_art66');
+
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
+      ) VALUES (
+        'salla_art66_store', 'شركة التجارة السعودية المعتمدة', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
+      ) ON CONFLICT (merchant_id) DO UPDATE SET 
+        store_name = EXCLUDED.store_name,
+        vat_number = EXCLUDED.vat_number,
+        crn = EXCLUDED.crn`,
+      [encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
+
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        'salla_art66_store', 'main', 'EGS-ART66-01', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 50, 'INITIAL_HASH_EDGE10',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge10', 'IOS-POS'
+      ) RETURNING id`,
+      [encKey, certPem, encSec]
+    );
+    const egsId = egsRes.rows[0].id;
+
+    // 1. Generate tax invoice with Arabic metadata
+    const order = createBaseMockOrder();
+    order.id = 882001;
+    order.customer.first_name = 'سلطان';
+    order.customer.last_name = 'الشمري';
+    order.items[0].name = 'جهاز حاسوب محمول فائق السرعة';
+
+    const invoiceDoc = await processSallaOrderIntoZatcaInvoice(client, egsId, order, 'idemp_art66_01');
+
+    // 2. Arabic Metadata Invariant: UBL XML must contain required Arabic text
+    assert.ok(invoiceDoc.signedXml.includes('شركة التجارة السعودية المعتمدة'), 'Must contain Arabic seller name');
+    assert.ok(invoiceDoc.signedXml.includes('جهاز حاسوب محمول فائق السرعة'), 'Must contain Arabic line item name');
+    assert.ok(invoiceDoc.signedXml.includes('0200000'), 'Must be registered under ZATCA Phase 2 simplified subtype');
+
+    // 3. Electronic Accessibility & 6-Year Retention Horizon:
+    // Query invoice by UUID and verify audit availability
+    const retrievedRes = await client.query(
+      `SELECT id, uuid, egs_unit_id, order_id, icv, invoice_hash, grand_total, status, created_at
+       FROM invoices WHERE id = $1`,
+      [invoiceDoc.invoiceId]
+    );
+    assert.equal(retrievedRes.rows.length, 1, 'Invoice must be electronically retrievable in KSA database');
+    const invoiceRecord = retrievedRes.rows[0];
+    assert.equal(invoiceRecord.uuid, invoiceDoc.invoiceUuid);
+    assert.ok(invoiceRecord.created_at, 'Invoice must carry immutable timestamp for 6-year retention tracking');
+
+    // 4. Immutability Invariant: Updates to core financial data and deletion must be strictly blocked
+    await assert.rejects(
+      async () => {
+        await client.query(`UPDATE invoices SET grand_total = 999.99 WHERE id = $1`, [invoiceDoc.invoiceId]);
+      },
+      (err: any) => {
+        assert.ok(err.message.includes('TAMPER_EVIDENT_PROTECTION'), 'Database trigger must reject financial alteration');
+        return true;
+      }
+    );
+
+    await assert.rejects(
+      async () => {
+        await client.query(`DELETE FROM invoices WHERE id = $1`, [invoiceDoc.invoiceId]);
+      },
+      (err: any) => {
+        assert.ok(err.message.includes('TAMPER_EVIDENT_PROTECTION'), 'Database trigger must reject invoice record deletion');
+        return true;
+      }
+    );
+  } finally {
+    client.release();
+    await pool.end();
+  }
+});

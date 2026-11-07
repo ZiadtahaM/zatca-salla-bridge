@@ -418,6 +418,15 @@ test('Discourse Edge Case 7: Rejected-Document Recovery: Immutable History & Has
     assert.equal(rejectedCheck.rows[0].icv, 11, 'Rejected document must preserve original ICV');
     assert.equal(rejectedCheck.rows[0].invoice_hash, hash1, 'Rejected document must preserve original hash');
 
+    // Step 2b: Issue an Intervening Document (Invoice B) before correcting Invoice 1
+    // This specifically tests the ZATCA invariant: PIH must reference the immediately preceding
+    // document emitted by this EGS unit, NOT unconditionally the rejected document.
+    const interveningOrder = createBaseMockOrder();
+    interveningOrder.id = 99250;
+    const docIntervening = await processSallaOrderIntoZatcaInvoice(client, egsId, interveningOrder, 'idemp_intervening_01');
+    assert.equal(docIntervening.icv, 12, 'Intervening document must have ICV 12');
+    assert.equal(docIntervening.pih, hash1, 'Intervening document PIH must reference rejected document hash');
+
     // Step 3: Resubmit corrected transaction via resubmitCorrectedZatcaInvoice
     const correctedOrder = createBaseMockOrder();
     correctedOrder.id = 99201;
@@ -425,17 +434,17 @@ test('Discourse Edge Case 7: Rejected-Document Recovery: Immutable History & Has
 
     const doc2 = await resubmitCorrectedZatcaInvoice(client, doc1.invoiceId, correctedOrder);
 
-    // Step 4: Verify new document identity
+    // Step 4: Verify new document identity and linear hash chain from intervening document
     assert.notEqual(doc2.invoiceUuid, doc1.invoiceUuid, 'Corrected resubmission must have a brand new UUID');
-    assert.equal(doc2.icv, 12, 'Corrected document must receive incremented ICV (12)');
-    assert.equal(doc2.pih, hash1, 'Corrected document PIH must reference the rejected document hash position');
+    assert.equal(doc2.icv, 13, 'Corrected document must receive incremented ICV (13)');
+    assert.equal(doc2.pih, docIntervening.invoiceHash, 'Corrected document PIH must reference immediately preceding intervening document hash, NOT rejected document');
 
     // Step 5: Issue subsequent Invoice 3 to verify linear chain continuity
     const order3 = createBaseMockOrder();
     order3.id = 99202;
     const doc3 = await processSallaOrderIntoZatcaInvoice(client, egsId, order3, 'idemp_reject_03');
 
-    assert.equal(doc3.icv, 13, 'Subsequent document must increment ICV to 13');
+    assert.equal(doc3.icv, 14, 'Subsequent document must increment ICV to 14');
     assert.equal(doc3.pih, doc2.invoiceHash, 'Subsequent document PIH must reference corrected document hash');
   } finally {
     client.release();
@@ -563,7 +572,7 @@ test('Discourse Edge Case 9: Salla Shipment Event Matrix: shipment.created Holds
     assert.equal(resCreated.statusCode, 200);
     assert.equal(resCreated.body.status, 'shipment_tracked', 'shipment.created must track shipment without issuing invoice');
 
-    // 2. shipment.updated with shipment_status = 'shipped' must HOLD
+    // 2. shipment.updated with shipment_status = 'shipped' triggers commencement of transportation tax point
     const shipmentShippedPayload = {
       event: 'shipment.updated',
       merchant: 'salla_shipment_store',
@@ -575,14 +584,14 @@ test('Discourse Edge Case 9: Salla Shipment Event Matrix: shipment.created Holds
     };
     const resShipped = await processSallaWebhookPayload(client, shipmentShippedPayload as any);
     assert.equal(resShipped.statusCode, 200);
-    assert.equal(resShipped.body.status, 'shipment_tracked', 'In-transit shipment must not issue invoice');
+    assert.equal(resShipped.body.status, 'shipment_dispatched', 'Commencement of transport qualifies as date of supply under Art 19(1)(a)');
 
     // 3. shipment.updated with shipment_status = 'delivered' confirms delivery
     const shipmentDeliveredPayload = {
       event: 'shipment.updated',
       merchant: 'salla_shipment_store',
       data: {
-        order_id: '881001',
+        order_id: '881002',
         shipment_status: 'delivered'
       }
     };

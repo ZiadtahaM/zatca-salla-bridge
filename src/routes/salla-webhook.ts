@@ -423,7 +423,10 @@ export async function processSallaWebhookPayload(
   }
 
   // 2. Dedicated Salla Shipment Event Handling:
-  // shipment.updated with status 'delivered' is the verified physical delivery event that fulfills tax point for COD.
+  // Under Saudi VAT Implementing Regulations Article 19(1)(a) & Online Sales Guidelines:
+  // For goods supplied with transportation, the date of supply is the commencement of transportation.
+  // Both shipment commencement ('shipped', 'dispatched', 'in_transit') and final physical delivery ('delivered')
+  // qualify as valid tax point events, while shipment creation ('created', label generated) remains tracked on hold.
   if (isShipmentEvent) {
     const rawData = payload.data as any;
     const shipmentStatus = (rawData?.shipment_status || rawData?.status || '').toString().toLowerCase().trim();
@@ -436,23 +439,33 @@ export async function processSallaWebhookPayload(
       };
     }
 
-    if (shipmentStatus === 'delivered') {
+    const isTransportCommenced = ['shipped', 'dispatched', 'in_transit'].includes(shipmentStatus);
+    const isDeliveryCompleted = shipmentStatus === 'delivered';
+
+    if (isDeliveryCompleted || isTransportCommenced) {
+      const reason = isDeliveryCompleted
+        ? 'تم تأكيد توصيل الشحنة بنجاح عبر شركة الشحن (Verified Delivery Event)'
+        : 'تم بدء نقل البضاعة عبر شركة الشحن (Commencement of Transportation Tax Point)';
+      const nextAction = isDeliveryCompleted
+        ? 'جاهز لإصدار الفاتورة الضريبية بعد اكتمال التوصيل الفعلي'
+        : 'جاهز لإصدار الفاتورة الضريبية عند بدء نقل البضاعة المنقولة';
+
       await transitionOrderSyncState(client, {
         merchantId,
         orderId: shipmentOrderId,
         toState: 'awaiting_processing',
         sourceEvent: payload.event,
-        reason: 'تم تأكيد توصيل الشحنة بنجاح عبر شركة الشحن (Verified Delivery Event)',
+        reason,
         isRecoverable: true,
-        nextAction: 'جاهز لإصدار الفاتورة الضريبية بعد اكتمال التوصيل الفعلي'
+        nextAction
       }).catch(() => {});
 
       return {
         statusCode: 200,
         body: {
-          status: 'shipment_delivered',
+          status: isDeliveryCompleted ? 'shipment_delivered' : 'shipment_dispatched',
           order_id: shipmentOrderId,
-          message: 'Verified delivery event recorded; proceeding to tax invoice issuance'
+          message: `${reason}; proceeding to tax invoice issuance`
         }
       };
     }

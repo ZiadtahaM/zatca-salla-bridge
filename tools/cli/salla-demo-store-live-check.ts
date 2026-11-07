@@ -171,8 +171,8 @@ async function main(): Promise<void> {
         $4, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 0, 'NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODU4ZjgyYTgwMjdhMDY1ZDE4MGNkNGI3Nzg4MzBkNWU1NTc1OWQ2ODU5Nw==',
         '\\x00'::bytea, '\\x00'::bytea, 'demo_cert_hash', '22222222-3333-4444-5555-666666666666', 'SallaBridge-V1',
         $5, $6, $7
-      ) ON CONFLICT (merchant_id, branch_id, custom_id) 
-      DO UPDATE SET updated_at = NOW() 
+      ) ON CONFLICT (merchant_id, branch_id, custom_id)
+      DO UPDATE SET updated_at = NOW()
       RETURNING id`,
       [merchantId, encPrivKey, certPem, encSecret, crn, vatNumber, storeName]
     );

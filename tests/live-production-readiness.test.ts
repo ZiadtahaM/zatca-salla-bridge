@@ -49,7 +49,7 @@ before(async () => {
         merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
       ) VALUES (
         'salla_demo_store', 'متجر سلة التجريبي', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
-      ) ON CONFLICT (merchant_id) DO UPDATE SET 
+      ) ON CONFLICT (merchant_id) DO UPDATE SET
         store_name = EXCLUDED.store_name,
         vat_number = EXCLUDED.vat_number,
         crn = EXCLUDED.crn`,

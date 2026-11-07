@@ -393,7 +393,7 @@ export async function processSallaWebhookPayload(
   const isRefundOrCancel = isRefund || isCancel;
   const isAddressUpdate = payload.event === 'order.shipping.address.updated';
   const isShipmentEvent = payload.event === 'shipment.created' || payload.event === 'shipment.updated';
-  const isOrderUpsert = payload.event === 'order.created' || 
+  const isOrderUpsert = payload.event === 'order.created' ||
                         payload.event === 'order.updated' ||
                         payload.event === 'order.status.updated' ||
                         payload.event === 'order.payment.updated';
@@ -507,13 +507,13 @@ export async function processSallaWebhookPayload(
                         (payload.data as any)?.refund_id?.toString() ||
                         (orderData as any)?.refund_id?.toString() ||
                         null;
-  const idempotencyKey = sallaRefundId 
+  const idempotencyKey = sallaRefundId
     ? `salla:${merchantId}:${payload.event}:${orderId}:${sallaRefundId}`
     : `salla:${merchantId}:${payload.event}:${orderId}:${payload.created_at}`;
 
   const existing = await client.query(
-    `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status 
-     FROM invoices 
+    `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status
+     FROM invoices
      WHERE idempotency_key = $1`,
     [idempotencyKey]
   );
@@ -572,8 +572,8 @@ export async function processSallaWebhookPayload(
 
   if (isOrderUpsert) {
     const existingOrderInvoice = await client.query(
-      `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status 
-       FROM invoices 
+      `SELECT id, uuid, icv, invoice_hash, qr_code_payload, status
+       FROM invoices
        WHERE order_id = $1 AND egs_unit_id = $2
          AND invoice_type IN ('simplified_tax_invoice', 'tax_invoice')
        ORDER BY created_at DESC LIMIT 1`,
@@ -763,8 +763,8 @@ export async function processSallaWebhookPayload(
   let result;
   if (isRefundOrCancel) {
     const origRes = await client.query(
-      `SELECT id, uuid, icv, status, grand_total, subtotal, tax_total, currency 
-       FROM invoices 
+      `SELECT id, uuid, icv, status, grand_total, subtotal, tax_total, currency
+       FROM invoices
        WHERE order_id = $1 AND invoice_type IN ('simplified_tax_invoice', 'tax_invoice')
        ORDER BY created_at DESC LIMIT 1`,
       [orderId]

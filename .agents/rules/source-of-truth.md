@@ -12,7 +12,7 @@ ZATCA Phase 2 defines an electronic invoice profile built upon OASIS UBL 2.1 wit
   * `<cbc:UUID>`: Universally unique identifier (UUID v4) generated dynamically per invoice [5-7]. Reusing UUIDs across invoices triggers duplicate rejection [6].
   * `<cbc:IssueDate>`: Date of issuance formatted as `YYYY-MM-DD` [5, 8].
   * `<cbc:IssueTime>`: Time of issuance formatted as `HH:mm:ss` or `HH:mm:ssZ` [5, 8, 9]. Must synchronize with the date/time stamped in the QR code and signature [8-10].
-  * `<cbc:InvoiceTypeCode name="NNNNNNN">388</cbc:InvoiceTypeCode>`: 
+  * `<cbc:InvoiceTypeCode name="NNNNNNN">388</cbc:InvoiceTypeCode>`:
     * Code `388` for standard/simplified tax invoice, `381` for credit note, `383` for debit note [5, 11-13].
     * Sub-type attribute `name` specifies invoice functional capability flags (e.g., `0100000` for Standard B2B, `0200000` for Simplified B2C) [5, 11, 12].
   * `<cbc:DocumentCurrencyCode>` and `<cbc:TaxCurrencyCode>`: Transaction currency (`SAR`) [5].

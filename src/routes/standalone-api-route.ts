@@ -56,14 +56,14 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
     const client = await pool.connect();
     try {
       const egsQuery = branchId
-        ? `SELECT e.*, 
+        ? `SELECT e.*,
                   COALESCE(e.crn, m.crn) AS seller_crn,
                   COALESCE(e.vat_number, m.vat_number) AS seller_vat,
                   COALESCE(e.branch_name, m.store_name) AS seller_name_arabic
            FROM egs_units e
            LEFT JOIN merchant_tokens m ON e.merchant_id = m.merchant_id
            WHERE e.merchant_id = $1 AND (e.branch_id = $2 OR e.custom_id = $2) AND e.is_active = TRUE LIMIT 1`
-        : `SELECT e.*, 
+        : `SELECT e.*,
                   COALESCE(e.crn, m.crn) AS seller_crn,
                   COALESCE(e.vat_number, m.vat_number) AS seller_vat,
                   COALESCE(e.branch_name, m.store_name) AS seller_name_arabic
@@ -224,14 +224,14 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
       await client.query('BEGIN');
 
       const egsQuery = branchId
-        ? `SELECT e.*, 
+        ? `SELECT e.*,
                   COALESCE(e.crn, m.crn) AS seller_crn,
                   COALESCE(e.vat_number, m.vat_number) AS seller_vat,
                   COALESCE(e.branch_name, m.store_name) AS seller_name_arabic
            FROM egs_units e
            LEFT JOIN merchant_tokens m ON e.merchant_id = m.merchant_id
            WHERE e.merchant_id = $1 AND (e.branch_id = $2 OR e.custom_id = $2) AND e.is_active = TRUE FOR UPDATE OF e LIMIT 1`
-        : `SELECT e.*, 
+        : `SELECT e.*,
                   COALESCE(e.crn, m.crn) AS seller_crn,
                   COALESCE(e.vat_number, m.vat_number) AS seller_vat,
                   COALESCE(e.branch_name, m.store_name) AS seller_name_arabic
@@ -391,8 +391,8 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
       );
 
       await client.query(
-        `UPDATE egs_units 
-         SET current_icv = $1, last_document_hash = $2, updated_at = NOW() 
+        `UPDATE egs_units
+         SET current_icv = $1, last_document_hash = $2, updated_at = NOW()
          WHERE id = $3`,
         [icv, signed.invoiceHashBase64, egs.id]
       );

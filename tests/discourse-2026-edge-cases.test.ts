@@ -377,7 +377,7 @@ test('Discourse Edge Case 7: Rejected-Document Recovery: Immutable History & Has
         merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
       ) VALUES (
         'salla_demo_store', 'متجر سلة التجريبي', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
-      ) ON CONFLICT (merchant_id) DO UPDATE SET 
+      ) ON CONFLICT (merchant_id) DO UPDATE SET
         store_name = EXCLUDED.store_name,
         vat_number = EXCLUDED.vat_number,
         crn = EXCLUDED.crn`,
@@ -468,7 +468,7 @@ test('Discourse Edge Case 8: Simplified Invoice Rejection (NOT_REPORTED) Remedy:
         merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
       ) VALUES (
         'salla_demo_store', 'متجر سلة التجريبي', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
-      ) ON CONFLICT (merchant_id) DO UPDATE SET 
+      ) ON CONFLICT (merchant_id) DO UPDATE SET
         store_name = EXCLUDED.store_name,
         vat_number = EXCLUDED.vat_number,
         crn = EXCLUDED.crn`,
@@ -538,7 +538,7 @@ test('Discourse Edge Case 9: Salla Shipment Event Matrix: shipment.created Holds
         merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at, cod_fulfillment_statuses
       ) VALUES (
         'salla_shipment_store', 'متجر الشحن التجريبي', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days', '["completed", "delivered"]'::jsonb
-      ) ON CONFLICT (merchant_id) DO UPDATE SET 
+      ) ON CONFLICT (merchant_id) DO UPDATE SET
         store_name = EXCLUDED.store_name,
         vat_number = EXCLUDED.vat_number,
         crn = EXCLUDED.crn`,
@@ -633,7 +633,7 @@ test('Discourse Edge Case 10: Article 66 Statutory Infrastructure Compliance: 6-
         merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
       ) VALUES (
         'salla_art66_store', 'شركة التجارة السعودية المعتمدة', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
-      ) ON CONFLICT (merchant_id) DO UPDATE SET 
+      ) ON CONFLICT (merchant_id) DO UPDATE SET
         store_name = EXCLUDED.store_name,
         vat_number = EXCLUDED.vat_number,
         crn = EXCLUDED.crn`,

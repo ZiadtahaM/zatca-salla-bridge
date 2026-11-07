@@ -265,10 +265,10 @@ export async function transitionOrderSyncState(
   input: SyncTransitionInput
 ): Promise<OrderSyncRecord> {
   const correlationId = input.correlationId || `corr_${input.orderId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-  
+
   // Compute default nextAction and isRecoverable based on state
-  let isRecoverable = input.recoveryPermitted !== undefined 
-    ? input.recoveryPermitted 
+  let isRecoverable = input.recoveryPermitted !== undefined
+    ? input.recoveryPermitted
     : (input.isRecoverable !== undefined ? input.isRecoverable : false);
   let nextAction = input.nextAction;
 

@@ -277,7 +277,7 @@ export function buildUblXmlFromSallaOrder(options: BuildUblXmlOptions): string {
   const docCurrency = options.currency || options.order.currency || (options.order as any).total?.currency || 'SAR';
   const isForeignCurrency = docCurrency !== 'SAR';
   const exchangeRateToSar = options.exchangeRateToSar || (docCurrency === 'USD' ? 3.75 : 1.0);
-  
+
   const buyerCountry = options.foreignBuyerCountry || (options.order.shipping?.address as any)?.country_code || (options.order.shipping?.address as any)?.country || 'SA';
   const isExport = options.isExport || (buyerCountry.toUpperCase() !== 'SA');
 
@@ -1454,7 +1454,7 @@ export async function processSallaOrderIntoZatcaInvoice(
       if (idempotencyKey) {
         const existingRes = await client.query(
           `SELECT id, uuid, icv, pih, invoice_hash, qr_code_payload, signed_xml, invoice_type
-           FROM invoices 
+           FROM invoices
            WHERE idempotency_key = $1`,
           [idempotencyKey]
         );
@@ -1474,7 +1474,7 @@ export async function processSallaOrderIntoZatcaInvoice(
         }
       }
       const egsRes = await client.query(
-        `SELECT e.id, e.merchant_id, e.branch_id, e.current_icv, e.last_document_hash, 
+        `SELECT e.id, e.merchant_id, e.branch_id, e.current_icv, e.last_document_hash,
                 e.private_key_pem, e.csid_secret, e.certificate, e.expires_at, e.csid_environment,
                 COALESCE(e.crn, m.crn) AS seller_crn,
                 COALESCE(e.vat_number, m.vat_number) AS seller_vat,
@@ -1586,10 +1586,10 @@ export async function processSallaOrderIntoZatcaInvoice(
       );
 
       await client.query(
-        `UPDATE egs_units 
-         SET current_icv = $1, 
-             last_document_hash = $2, 
-             updated_at = NOW() 
+        `UPDATE egs_units
+         SET current_icv = $1,
+             last_document_hash = $2,
+             updated_at = NOW()
          WHERE id = $3`,
         [nextIcv, signed.invoiceHashBase64, egs.id]
       );
@@ -1635,7 +1635,7 @@ export async function processSallaRefundIntoZatcaCreditNote(
       if (idempotencyKey) {
         const existingRes = await client.query(
           `SELECT id, uuid, icv, pih, invoice_hash, qr_code_payload, signed_xml, invoice_type
-           FROM invoices 
+           FROM invoices
            WHERE idempotency_key = $1`,
           [idempotencyKey]
         );
@@ -1655,8 +1655,8 @@ export async function processSallaRefundIntoZatcaCreditNote(
         }
       }
     const origRes = await client.query(
-      `SELECT id, uuid, icv, status 
-       FROM invoices 
+      `SELECT id, uuid, icv, status
+       FROM invoices
        WHERE order_id = $1 AND invoice_type IN ('simplified_tax_invoice', 'tax_invoice')
        ORDER BY created_at DESC LIMIT 1`,
       [order.id.toString()]
@@ -1669,7 +1669,7 @@ export async function processSallaRefundIntoZatcaCreditNote(
     const originalInvoice = origRes.rows[0];
 
     const egsRes = await client.query(
-      `SELECT e.id, e.merchant_id, e.current_icv, e.last_document_hash, 
+      `SELECT e.id, e.merchant_id, e.current_icv, e.last_document_hash,
               e.private_key_pem, e.csid_secret, e.certificate, e.expires_at, e.csid_environment,
               COALESCE(e.crn, m.crn) AS seller_crn,
               COALESCE(e.vat_number, m.vat_number) AS seller_vat,
@@ -1781,10 +1781,10 @@ export async function processSallaRefundIntoZatcaCreditNote(
     );
 
     await client.query(
-      `UPDATE egs_units 
-       SET current_icv = $1, 
-           last_document_hash = $2, 
-           updated_at = NOW() 
+      `UPDATE egs_units
+       SET current_icv = $1,
+           last_document_hash = $2,
+           updated_at = NOW()
        WHERE id = $3`,
       [nextIcv, signed.invoiceHashBase64, egs.id]
     );
@@ -1842,7 +1842,7 @@ export async function processPartialCreditNote(
       if (options.idempotencyKey) {
         const existingRes = await client.query(
           `SELECT id, uuid, icv, pih, invoice_hash, qr_code_payload, signed_xml, invoice_type
-           FROM invoices 
+           FROM invoices
            WHERE idempotency_key = $1`,
           [options.idempotencyKey]
         );
@@ -1864,8 +1864,8 @@ export async function processPartialCreditNote(
     let originalInvoice: any = null;
     if (options.originalInvoiceId) {
       const origRes = await client.query(
-        `SELECT id, uuid, icv, status, grand_total, currency, invoice_type, order_id 
-         FROM invoices 
+        `SELECT id, uuid, icv, status, grand_total, currency, invoice_type, order_id
+         FROM invoices
          WHERE id = $1 OR uuid = $1
          LIMIT 1`,
         [options.originalInvoiceId]
@@ -1906,7 +1906,7 @@ export async function processPartialCreditNote(
     }
 
     const egsRes = await client.query(
-      `SELECT e.id, e.merchant_id, e.current_icv, e.last_document_hash, 
+      `SELECT e.id, e.merchant_id, e.current_icv, e.last_document_hash,
               e.private_key_pem, e.csid_secret, e.certificate, e.expires_at, e.csid_environment,
               COALESCE(e.crn, m.crn) AS seller_crn,
               COALESCE(e.vat_number, m.vat_number) AS seller_vat,
@@ -2066,10 +2066,10 @@ export async function processPartialCreditNote(
     );
 
     await client.query(
-      `UPDATE egs_units 
-       SET current_icv = $1, 
-           last_document_hash = $2, 
-           updated_at = NOW() 
+      `UPDATE egs_units
+       SET current_icv = $1,
+           last_document_hash = $2,
+           updated_at = NOW()
        WHERE id = $3`,
       [nextIcv, signed.invoiceHashBase64, egs.id]
     );

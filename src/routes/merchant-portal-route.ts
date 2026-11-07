@@ -175,7 +175,7 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
         syncRecords = syncRes.rows;
 
         const statsRes = await client.query(
-          `SELECT 
+          `SELECT
              COUNT(*)::int AS total,
              COUNT(*) FILTER (WHERE sync_state IN ('successfully_cleared', 'successfully_reported', 'successfully_processed'))::int AS successful,
              COUNT(*) FILTER (WHERE sync_state IN ('requires_human_review', 'awaiting_processing'))::int AS review,
@@ -403,9 +403,9 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
       if (id !== 'historical' && id !== 'external') {
         const invRes = await client.query(
           `SELECT i.id, i.egs_unit_id, i.uuid, i.grand_total, i.status, e.merchant_id
-           FROM invoices i 
+           FROM invoices i
            JOIN egs_units e ON i.egs_unit_id = e.id
-           WHERE i.id = $1 OR i.uuid = $1 
+           WHERE i.id = $1 OR i.uuid = $1
            LIMIT 1`,
           [id]
         );
@@ -605,7 +605,7 @@ async function seedDemoStoreIfNeeded(client: any): Promise<void> {
       egs_unit_id, order_id, idempotency_key, invoice_type, uuid, icv, pih,
       invoice_hash, qr_code_payload, signed_xml, status, supply_date,
       issue_timestamp, subtotal, tax_total, grand_total, currency
-    ) VALUES 
+    ) VALUES
     ($1, 'ORD-77102', 'idem_demo_1', 'simplified_tax_invoice', $2, 1, $3, 'hash_inv_1', $4, $5, 'reported', '2026-10-24', NOW() - INTERVAL '3 hours', 300.00, 45.00, 345.00, 'SAR'),
     ($1, 'ORD-88219', 'idem_demo_2', 'tax_invoice', $6, 2, 'hash_inv_1', 'hash_inv_2', $7, $5, 'cleared', '2026-10-24', NOW() - INTERVAL '2 hours', 4000.00, 600.00, 4600.00, 'SAR'),
     ($1, 'ORD-91500', 'idem_demo_3', 'simplified_tax_invoice', $8, 3, 'hash_inv_2', 'hash_inv_3', $9, $5, 'reported', '2026-10-24', NOW() - INTERVAL '1 hour', 156.52, 23.48, 180.00, 'SAR')
@@ -770,14 +770,14 @@ function renderPortalHtml(data: {
     h1, h2, h3, .brand-title { font-family: 'Cairo', sans-serif; }
     body { background-color: var(--bg); color: var(--text); padding: 24px 16px; direction: rtl; line-height: 1.6; }
     .container { max-width: 1240px; margin: 0 auto; }
-    
+
     header { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; margin-bottom: 24px; box-shadow: var(--shadow-sm); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
     .brand { display: flex; align-items: center; gap: 14px; }
     .brand-logo { width: 44px; height: 44px; background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); border-radius: 10px; display: flex; align-items: center; justify-content: center; color: white; font-weight: 800; font-size: 1.3rem; box-shadow: 0 4px 10px rgba(0, 77, 64, 0.25); }
     .brand h1 { font-size: 1.35rem; color: var(--text); font-weight: 700; }
     .brand p { color: var(--text-muted); font-size: 0.85rem; margin-top: 2px; }
     .merchant-meta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    
+
     .badge { padding: 6px 12px; border-radius: 9999px; font-size: 0.8rem; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
     .badge-success { background: var(--accent-bg); color: #065f46; border: 1px solid #a7f3d0; }
     .badge-warning { background: var(--warning-bg); color: #92400e; border: 1px solid #fde68a; }
@@ -798,7 +798,7 @@ function renderPortalHtml(data: {
     /* Interactive Live Demo Banner */
     .demo-banner { background: linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%); border: 1.5px solid #a7f3d0; border-radius: var(--radius); padding: 20px 24px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; box-shadow: var(--shadow-sm); }
     .demo-pill { display: inline-block; background: #004d40; color: white; font-size: 0.75rem; font-weight: 700; padding: 3px 10px; border-radius: 9999px; text-transform: uppercase; margin-bottom: 6px; }
-    
+
     .nav-tabs { display: flex; gap: 8px; background: var(--surface); border: 1px solid var(--border); padding: 6px; border-radius: var(--radius); margin-bottom: 24px; box-shadow: var(--shadow-sm); overflow-x: auto; }
     .tab-btn { background: none; border: none; color: var(--text-muted); padding: 10px 18px; font-size: 0.92rem; font-weight: 600; cursor: pointer; border-radius: var(--radius-sm); transition: all 0.2s; white-space: nowrap; display: flex; align-items: center; gap: 8px; }
     .tab-btn:hover { color: var(--text); background: var(--surface-sub); }
@@ -2114,7 +2114,7 @@ function renderPortalHtml(data: {
         if (res.ok && data.order) {
           const ord = data.order;
           document.getElementById('timeline-state-badge').textContent = ord.sync_state;
-          document.getElementById('timeline-meta-text').innerHTML = 
+          document.getElementById('timeline-meta-text').innerHTML =
             'نوع الوثيقة: <strong>' + (ord.invoice_type || 'غير محدد') + '</strong> | عدد المحاولات: <strong>' + ord.attempt_count + '</strong> | معرف الارتباط: <code>' + (ord.correlation_id || 'N/A') + '</code>';
 
           if (ord.history && ord.history.length > 0) {

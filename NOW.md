@@ -89,5 +89,3 @@ Perimeter rate limiters restrict recovery traffic to fifteen requests per minute
 No duplicate invoices can be generated.
 The engine holds advisory transaction locks during execution, preventing sequence collisions and protecting cryptographic integrity.
 Support exports redact credentials, certificates, and customer identities.
-
-

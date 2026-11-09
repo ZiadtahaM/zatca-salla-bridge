@@ -66,7 +66,7 @@ jobs:
       - name: Salla Sync Control & Safe Recovery Regression Gate
         env:
           DATABASE_URL: postgres://zatca_admin:secret_zatca_password@127.0.0.1:5432/zatca_ledger
-        run: node --loader ts-node/esm --test tests/sync-control-and-recovery.test.ts
+        run: npx tsx --test tests/sync-control-and-recovery.test.ts
 
       - name: Master Verification Lever (16 Architecture Gates)
         env:

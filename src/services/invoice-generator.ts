@@ -1431,6 +1431,8 @@ export interface ProcessInvoiceOverrides {
   sellerNameArabic?: string;
   sellerVat?: string;
   sellerCrn?: string;
+  preservedIssueDate?: string;
+  replacesInvoiceId?: string;
 }
 
 export async function processSallaOrderIntoZatcaInvoice(
@@ -1443,7 +1445,7 @@ export async function processSallaOrderIntoZatcaInvoice(
   return withEgsMutex(egsUnitId, async () => {
     const isB2C = !isB2bCustomer(order.customer?.tax_number);
     const now = new Date();
-    const issueDate = now.toISOString().split('T')[0];
+    const issueDate = overrides?.preservedIssueDate || now.toISOString().split('T')[0];
     const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
     const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
     const invoiceUuid = crypto.randomUUID();
@@ -1560,11 +1562,11 @@ export async function processSallaOrderIntoZatcaInvoice(
         `INSERT INTO invoices (
           egs_unit_id, order_id, idempotency_key, invoice_type, uuid,
           icv, pih, invoice_hash, qr_code_payload, signed_xml,
-          status, supply_date, issue_timestamp, subtotal, tax_total, grand_total
+          status, supply_date, issue_timestamp, replaces_invoice_id, subtotal, tax_total, grand_total
         ) VALUES (
           $1, $2, $3, $4, $5,
           $6, $7, $8, $9, $10,
-          'signed', $11, $12, $13, $14, $15
+          'signed', $11, $12, $13, $14, $15, $16
         ) RETURNING id`,
         [
           egs.id,
@@ -1579,6 +1581,7 @@ export async function processSallaOrderIntoZatcaInvoice(
           signed.signedXml,
           issueDate,
           issueDateTimeIsoZ,
+          overrides?.replacesInvoiceId || null,
           lineExtensionTotal,
           declaredTaxTotal,
           grandTotal
@@ -2222,39 +2225,129 @@ export async function remedyRejectedSimplifiedInvoice(
   return { creditNote, replacementInvoice };
 }
 
+export interface SimplifiedReportingResubmissionResult {
+  invoiceId: string;
+  invoiceUuid: string;
+  originalInvoiceId: string;
+  replacementInvoiceId: string;
+  replacementUuid: string;
+  icv: number;
+  invoiceHash: string;
+  pih: string;
+  status: string;
+  isCustomerDeliveryRequired: boolean;
+  message: string;
+}
+
 /**
  * ZATCA Phase 2: Resubmission for Ordinary Simplified Reporting Rejection.
- * Per ZATCA Technical Guidelines FAQ:
- * If a simplified tax invoice is rejected during reporting (within the 24-hour window),
- * the taxpayer must correct the technical error and resubmit the document for reporting.
- * There is generally NO NEED to issue another invoice to the buyer, because the buyer
- * already holds a valid simplified tax invoice issued at point of sale / delivery.
+ * Per ZATCA E-Invoicing Detailed Technical Guidelines (pages 71–72):
+ * When an ordinary simplified tax invoice is rejected during reporting (within the 24-hour window),
+ * the taxpayer must generate a corrected reporting document submitted to FATOORA with:
+ * - A new UUID
+ * - An incremented invoice counter value (ICV)
+ * - A new unique cryptographic hash
+ * - A new generation timestamp (IssueTime)
+ * - The original transaction date retained on the invoice (IssueDate)
+ * - Chained to the immediately preceding document emitted by that EGS unit (PIH)
+ *
+ * Crucially, no duplicate invoice is delivered to the customer because the customer
+ * already holds the original valid simplified tax invoice issued at point of sale / delivery.
+ * The rejected document remains immutable in the audit history.
  */
 export async function resubmitSimplifiedInvoiceForReporting(
   client: PoolClient,
-  invoiceId: string
-): Promise<{ invoiceId: string; invoiceUuid: string; status: string; message: string }> {
-  const invRes = await client.query(
-    `SELECT id, uuid, invoice_type, status, signed_xml FROM invoices WHERE id = $1`,
+  invoiceId: string,
+  correctedOrder?: SallaOrderData,
+  overrides?: ProcessInvoiceOverrides
+): Promise<SimplifiedReportingResubmissionResult> {
+  const rejectedRes = await client.query(
+    `SELECT i.id, i.uuid, i.egs_unit_id, i.order_id, i.idempotency_key, i.icv, i.invoice_hash,
+            i.status, i.invoice_type, i.supply_date, i.currency, i.grand_total, u.merchant_id
+     FROM invoices i
+     JOIN egs_units u ON i.egs_unit_id = u.id
+     WHERE i.id = $1`,
     [invoiceId]
   );
-  if (!invRes || invRes.rows.length === 0) {
+  if (!rejectedRes || rejectedRes.rows.length === 0) {
     throw new Error(`Invoice ${invoiceId} not found`);
   }
-  const inv = invRes.rows[0];
-  if (inv.invoice_type !== 'simplified_tax_invoice') {
+  const rejected = rejectedRes.rows[0];
+  if (rejected.invoice_type !== 'simplified_tax_invoice') {
     throw new Error(`Invoice ${invoiceId} is not a simplified tax invoice`);
   }
+  if (rejected.status !== 'rejected_reporting' && rejected.status !== 'rejected') {
+    throw new Error(`Invoice ${invoiceId} has status '${rejected.status}'. Only reporting-rejected invoices require resubmission.`);
+  }
+
+  let orderToProcess: SallaOrderData;
+  if (correctedOrder) {
+    orderToProcess = correctedOrder;
+  } else {
+    const syncRes = await client.query(
+      `SELECT order_amount, order_currency FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
+      [rejected.merchant_id, rejected.order_id]
+    );
+    const amount = Number(syncRes.rows?.[0]?.order_amount || rejected.grand_total || 115);
+    const currency = syncRes.rows?.[0]?.order_currency || rejected.currency || 'SAR';
+    const subtotal = Number((amount / 1.15).toFixed(2));
+    const tax = Number((amount - subtotal).toFixed(2));
+
+    orderToProcess = {
+      id: Number(rejected.order_id) || 1001,
+      currency,
+      customer: { first_name: 'Customer', email: 'customer@example.com' },
+      items: [
+        {
+          id: 1,
+          name: 'Corrected Item Supply',
+          quantity: 1,
+          price: { amount: subtotal, currency }
+        }
+      ],
+      amounts: {
+        sub_total: { amount: subtotal, currency },
+        tax: { amount: { amount: tax, currency } },
+        total: { amount, currency }
+      }
+    } as any;
+  }
+
+  const newIdempotency = `${rejected.idempotency_key}:reporting_retry:${Date.now()}`;
+  const originalSupplyDate = rejected.supply_date
+    ? (rejected.supply_date instanceof Date ? rejected.supply_date.toISOString().split('T')[0] : String(rejected.supply_date).split('T')[0])
+    : undefined;
+
+  const resubmitOverrides: ProcessInvoiceOverrides = {
+    ...overrides,
+    preservedIssueDate: originalSupplyDate,
+    replacesInvoiceId: rejected.id
+  };
+
+  const replacement = await processSallaOrderIntoZatcaInvoice(
+    client,
+    rejected.egs_unit_id,
+    orderToProcess,
+    newIdempotency,
+    resubmitOverrides
+  );
 
   await client.query(
     `UPDATE invoices SET status = 'submitted', updated_at = NOW() WHERE id = $1`,
-    [invoiceId]
+    [replacement.invoiceId]
   );
 
   return {
-    invoiceId: inv.id,
-    invoiceUuid: inv.uuid,
+    invoiceId: replacement.invoiceId,
+    invoiceUuid: replacement.invoiceUuid,
+    originalInvoiceId: rejected.id,
+    replacementInvoiceId: replacement.invoiceId,
+    replacementUuid: replacement.invoiceUuid,
+    icv: replacement.icv,
+    invoiceHash: replacement.invoiceHash,
+    pih: replacement.pih,
     status: 'resubmitted_for_reporting',
-    message: 'Simplified invoice re-queued for reporting transmission without issuing duplicate invoice to buyer'
+    isCustomerDeliveryRequired: false,
+    message: 'Corrected document generated with new identity (UUID, ICV, hash, timestamp) and original transaction date; queued for reporting without duplicate customer delivery'
   };
 }

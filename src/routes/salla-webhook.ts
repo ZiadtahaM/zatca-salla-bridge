@@ -436,6 +436,10 @@ export async function processSallaWebhookPayload(
     const shipmentStatus = (rawData?.shipment_status || rawData?.status || '').toString().toLowerCase().trim();
     const shipmentOrderId = (rawData?.order_id || rawData?.order?.id || '').toString();
     const actualPickedUpAt = rawData?.actual_picked_up_at || rawData?.shipment?.actual_picked_up_at || null;
+    const courierName = (rawData?.courier?.name || rawData?.courier_name || rawData?.shipping_company || rawData?.shipment?.courier?.name || rawData?.shipment?.courier_name || '').toString().trim();
+    const courierId = (rawData?.courier?.id || rawData?.courier_id || rawData?.shipment?.courier?.id || '').toString().trim();
+    const trackingNumber = (rawData?.tracking_number || rawData?.shipment?.tracking_number || '').toString().trim();
+    const hasCarrierProvenance = Boolean(courierName || courierId || trackingNumber);
 
     if (!shipmentOrderId) {
       return {
@@ -444,11 +448,58 @@ export async function processSallaWebhookPayload(
       };
     }
 
-    const isTransportCommenced = shipmentStatus === 'in_transit' || !!actualPickedUpAt || shipmentStatus === 'shipped' || shipmentStatus === 'dispatched';
+    // 1. Validate pickup timestamp chronological consistency if provided
+    if (actualPickedUpAt) {
+      const parsedPickup = Date.parse(actualPickedUpAt);
+      if (isNaN(parsedPickup) || new Date(actualPickedUpAt).getTime() > Date.now() + 60000) {
+        return {
+          statusCode: 200,
+          body: {
+            status: 'invalid_future_pickup_timestamp',
+            order_id: shipmentOrderId,
+            message: `Actual pickup timestamp '${actualPickedUpAt}' is invalid or set in the future; handover rejected`
+          }
+        };
+      }
+    }
+
+    // 2. Validate carrier provenance when transport commencement is asserted
+    const isTransportStatus = shipmentStatus === 'in_transit' || shipmentStatus === 'shipped' || shipmentStatus === 'dispatched' || !!actualPickedUpAt;
     const isDeliveryCompleted = shipmentStatus === 'delivered';
 
+    if (isTransportStatus && !isDeliveryCompleted && !hasCarrierProvenance) {
+      return {
+        statusCode: 200,
+        body: {
+          status: 'shipment_held_unverified_carrier',
+          order_id: shipmentOrderId,
+          shipment_status: shipmentStatus,
+          message: `In-transit status '${shipmentStatus}' received without verified carrier provenance or tracking number; tax point held`
+        }
+      };
+    }
+
+    // 3. Idempotency for repeated shipment events
+    const existingSyncRes = await client.query(
+      `SELECT sync_state, source_event FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
+      [merchantId, shipmentOrderId]
+    );
+    const existingSync = existingSyncRes.rows?.[0];
+    if (existingSync && (existingSync.sync_state === 'awaiting_processing' || existingSync.sync_state === 'synced' || existingSync.sync_state === 'successfully_processed') && existingSync.source_event === payload.event) {
+      return {
+        statusCode: 200,
+        body: {
+          status: 'shipment_already_processed',
+          order_id: shipmentOrderId,
+          message: 'Shipment event already recorded and order queued for tax point processing'
+        }
+      };
+    }
+
+    const isTransportCommenced = (isTransportStatus && hasCarrierProvenance) || isDeliveryCompleted;
+
     if (isDeliveryCompleted || isTransportCommenced) {
-      const pickupDetail = actualPickedUpAt ? ` (Carrier Handover Confirmed at ${actualPickedUpAt})` : '';
+      const pickupDetail = actualPickedUpAt ? ` (Carrier Handover Confirmed at ${actualPickedUpAt} via ${courierName || 'Carrier'})` : '';
       const reason = isDeliveryCompleted
         ? 'تم تأكيد توصيل الشحنة بنجاح عبر شركة الشحن (Verified Delivery Event)'
         : `تم بدء نقل البضاعة عبر شركة الشحن${pickupDetail} (Commencement of Transportation Tax Point - GCC Agreement Art 23(2)(b) & KSA VAT Regs Art 27)`;
@@ -472,6 +523,8 @@ export async function processSallaWebhookPayload(
           status: isDeliveryCompleted ? 'shipment_delivered' : 'shipment_dispatched',
           order_id: shipmentOrderId,
           actual_picked_up_at: actualPickedUpAt,
+          courier_name: courierName || undefined,
+          tracking_number: trackingNumber || undefined,
           message: `${reason}; proceeding to tax invoice issuance`
         }
       };

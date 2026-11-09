@@ -574,7 +574,37 @@ test('Discourse Edge Case 9: Salla Shipment Event Matrix: shipment.created Holds
     assert.equal(resCreated.statusCode, 200);
     assert.equal(resCreated.body.status, 'shipment_tracked', 'shipment.created with empty labels must track shipment without issuing invoice');
 
-    // 2. shipment.updated with in_transit (June 2025 Salla API) & actual_picked_up_at verified handover timestamp
+    // 2. shipment.updated with in_transit & unverified carrier provenance (no courier or tracking): must HOLD
+    const shipmentUnverifiedPayload = {
+      event: 'shipment.updated',
+      merchant: 'salla_shipment_store',
+      data: {
+        order_id: '881001',
+        shipment_status: 'in_transit'
+      }
+    };
+    const resUnverified = await processSallaWebhookPayload(client, shipmentUnverifiedPayload as any);
+    assert.equal(resUnverified.statusCode, 200);
+    assert.equal(resUnverified.body.status, 'shipment_held_unverified_carrier', 'Must hold shipment event lacking carrier provenance');
+
+    // 3. shipment.updated with future actual_picked_up_at: must REJECT
+    const futurePickupTime = new Date(Date.now() + 86400000).toISOString();
+    const shipmentFuturePayload = {
+      event: 'shipment.updated',
+      merchant: 'salla_shipment_store',
+      data: {
+        order_id: '881001',
+        shipment_status: 'in_transit',
+        actual_picked_up_at: futurePickupTime,
+        tracking_number: 'TRACK-FUTURE-01',
+        courier: { name: 'DHL Express' }
+      }
+    };
+    const resFuture = await processSallaWebhookPayload(client, shipmentFuturePayload as any);
+    assert.equal(resFuture.statusCode, 200);
+    assert.equal(resFuture.body.status, 'invalid_future_pickup_timestamp', 'Must reject handover timestamp set in the future');
+
+    // 4. shipment.updated with in_transit, verified carrier and chronological actual_picked_up_at
     // Triggers commencement of transportation tax point under GCC Unified VAT Agreement Article 23(2)(b) & KSA VAT Regs Article 27
     const shipmentInTransitPayload = {
       event: 'shipment.updated',
@@ -583,7 +613,8 @@ test('Discourse Edge Case 9: Salla Shipment Event Matrix: shipment.created Holds
         order_id: '881001',
         shipment_status: 'in_transit',
         actual_picked_up_at: '2026-11-07T14:30:00Z',
-        tracking_number: 'TRACK123456'
+        tracking_number: 'TRACK123456',
+        courier: { name: 'Aramex', id: 'CR-101' }
       }
     };
     const resInTransit = await processSallaWebhookPayload(client, shipmentInTransitPayload as any);
@@ -591,7 +622,12 @@ test('Discourse Edge Case 9: Salla Shipment Event Matrix: shipment.created Holds
     assert.equal(resInTransit.body.status, 'shipment_dispatched', 'Commencement of transport qualifies as date of supply under GCC Agreement Art 23(2)(b) & KSA VAT Regs Art 27');
     assert.equal(resInTransit.body.actual_picked_up_at, '2026-11-07T14:30:00Z', 'Must preserve verified carrier pickup timestamp');
 
-    // 3. shipment.updated with shipment_status = 'delivered' confirms physical delivery
+    // 5. Idempotent repeated shipment event
+    const resRepeat = await processSallaWebhookPayload(client, shipmentInTransitPayload as any);
+    assert.equal(resRepeat.statusCode, 200);
+    assert.equal(resRepeat.body.status, 'shipment_already_processed', 'Repeated shipment event must be handled idempotently');
+
+    // 6. shipment.updated with shipment_status = 'delivered' confirms physical delivery
     const shipmentDeliveredPayload = {
       event: 'shipment.updated',
       merchant: 'salla_shipment_store',
@@ -604,7 +640,7 @@ test('Discourse Edge Case 9: Salla Shipment Event Matrix: shipment.created Holds
     assert.equal(resDelivered.statusCode, 200);
     assert.equal(resDelivered.body.status, 'shipment_delivered', 'shipment.updated delivered must confirm physical delivery');
 
-    // 4. order.shipping.address.updated updates address without issuing invoice
+    // 7. order.shipping.address.updated updates address without issuing invoice
     const addressUpdatePayload = {
       event: 'order.shipping.address.updated',
       merchant: 'salla_shipment_store',
@@ -686,13 +722,29 @@ test('Discourse Edge Case 10: Article 66 Statutory Infrastructure Compliance: 6-
     assert.ok(invoiceRecord.created_at, 'Invoice must carry immutable timestamp for 6-year retention tracking');
 
     // Article 66(1) Retention Calculation:
-    // Under Saudi VAT Implementing Regulations Article 66(1):
-    // Ordinary retention runs 6 years from the END of the relevant tax period (not raw creation date).
-    // Capital assets require retention for the adjustment period (10 years) + 5 years from acquisition date.
-    function calculateArticle66RetentionDeadline(issueDate: Date, filerType: 'monthly' | 'quarterly', isCapitalAsset = false): Date {
-      if (isCapitalAsset) {
+    // Under Saudi VAT Implementing Regulations Article 66(1), read together with Article 52:
+    // 1. Standard tax records: at least 6 years from the END of the relevant tax period (month or quarter).
+    // 2. Immovable capital assets permanently attached to real estate: 10-year adjustment + 5 years = 15 years from acquisition.
+    // 3. Movable tangible and intangible capital assets: 6-year adjustment + 5 years = 11 years from acquisition.
+    // 4. Modified useful life assets: modified adjustment period + 5 years from acquisition.
+    function calculateArticle66RetentionDeadline(
+      issueDate: Date,
+      filerType: 'monthly' | 'quarterly',
+      assetCategory?: 'standard' | 'immovable' | 'movable_tangible' | 'intangible' | number
+    ): Date {
+      if (assetCategory === 'immovable') {
         const deadline = new Date(issueDate);
         deadline.setFullYear(deadline.getFullYear() + 15);
+        return deadline;
+      }
+      if (assetCategory === 'movable_tangible' || assetCategory === 'intangible') {
+        const deadline = new Date(issueDate);
+        deadline.setFullYear(deadline.getFullYear() + 11);
+        return deadline;
+      }
+      if (typeof assetCategory === 'number') {
+        const deadline = new Date(issueDate);
+        deadline.setFullYear(deadline.getFullYear() + assetCategory + 5);
         return deadline;
       }
       const year = issueDate.getUTCFullYear();
@@ -716,8 +768,17 @@ test('Discourse Edge Case 10: Article 66 Statutory Infrastructure Compliance: 6-
     const quarterlyDeadline = calculateArticle66RetentionDeadline(testDate, 'quarterly');
     assert.equal(quarterlyDeadline.toISOString().slice(0, 10), '2032-06-30', 'Quarterly filer 6-year retention runs from end of Q2 2026');
 
-    const capitalAssetDeadline = calculateArticle66RetentionDeadline(testDate, 'quarterly', true);
-    assert.equal(capitalAssetDeadline.toISOString().slice(0, 10), '2041-05-14', 'Capital asset retention runs 15 years from acquisition');
+    const immovableDeadline = calculateArticle66RetentionDeadline(testDate, 'quarterly', 'immovable');
+    assert.equal(immovableDeadline.toISOString().slice(0, 10), '2041-05-14', 'Immovable capital asset retention runs 15 years from acquisition');
+
+    const movableDeadline = calculateArticle66RetentionDeadline(testDate, 'quarterly', 'movable_tangible');
+    assert.equal(movableDeadline.toISOString().slice(0, 10), '2037-05-14', 'Movable tangible capital asset retention runs 11 years from acquisition');
+
+    const intangibleDeadline = calculateArticle66RetentionDeadline(testDate, 'quarterly', 'intangible');
+    assert.equal(intangibleDeadline.toISOString().slice(0, 10), '2037-05-14', 'Intangible capital asset retention runs 11 years from acquisition');
+
+    const customDeadline = calculateArticle66RetentionDeadline(testDate, 'quarterly', 8);
+    assert.equal(customDeadline.toISOString().slice(0, 10), '2039-05-14', 'Modified 8-year useful life asset retention runs 13 years from acquisition');
 
     // 4. Immutability Invariant: Updates to core financial data and deletion must be strictly blocked
     await assert.rejects(
@@ -782,20 +843,40 @@ test('Discourse Edge Case 11: Ordinary Simplified Reporting Rejection Resubmissi
     // 1. Generate an initial simplified invoice (issued and given to buyer)
     const order1 = createBaseMockOrder();
     order1.id = 883001;
-    const inv1 = await processSallaOrderIntoZatcaInvoice(client, egsId, order1, 'idemp_rej_01');
+    const inv1 = await processSallaOrderIntoZatcaInvoice(client, egsId, order1, 'idemp_rej_01', {
+      preservedIssueDate: '2026-10-21'
+    });
 
     // Simulate technical reporting rejection by ZATCA reporting API
     await client.query(`UPDATE invoices SET status = 'rejected_reporting' WHERE id = $1`, [inv1.invoiceId]);
 
     // Scenario A: Ordinary reporting rejection
-    // Under ZATCA FAQ: The taxpayer corrects technical transmission error and resubmits for reporting.
-    // Generally NO NEED to issue another invoice to the buyer!
+    // Under ZATCA E-Invoicing Detailed Technical Guidelines (pages 71–72):
+    // The corrected document submitted for reporting must have:
+    // - A brand new UUID
+    // - An incremented invoice counter value (ICV)
+    // - A new unique cryptographic hash
+    // - A new generation timestamp (IssueTime)
+    // - The original transaction date retained (IssueDate)
+    // - Chained to the immediately preceding document emitted by that EGS unit (PIH)
+    // - No duplicate invoice delivered to the customer!
     const resubmitRes = await resubmitSimplifiedInvoiceForReporting(client, inv1.invoiceId);
     assert.equal(resubmitRes.status, 'resubmitted_for_reporting');
-    assert.equal(resubmitRes.invoiceId, inv1.invoiceId, 'Must preserve original invoice identity without creating duplicate buyer document');
+    assert.notEqual(resubmitRes.replacementUuid, inv1.invoiceUuid, 'Corrected document must carry a new UUID');
+    assert.ok(resubmitRes.icv > inv1.icv, 'Corrected document must increment ICV');
+    assert.notEqual(resubmitRes.invoiceHash, inv1.invoiceHash, 'Corrected document must generate a new cryptographic hash');
+    assert.equal(resubmitRes.pih, inv1.invoiceHash, 'Must maintain EGS hash chain using preceding document hash as PIH');
+    assert.equal(resubmitRes.isCustomerDeliveryRequired, false, 'Must NOT deliver duplicate invoice to customer');
 
-    const updatedInv = await client.query(`SELECT status FROM invoices WHERE id = $1`, [inv1.invoiceId]);
-    assert.equal(updatedInv.rows[0].status, 'submitted', 'Status updated to submitted for reporting retry');
+    // The rejected document remains immutable in the audit history
+    const origInv = await client.query(`SELECT status FROM invoices WHERE id = $1`, [inv1.invoiceId]);
+    assert.equal(origInv.rows[0].status, 'rejected_reporting', 'Original rejected invoice must remain immutable in audit ledger');
+
+    // The replacement document has status 'submitted' and links to the rejected invoice
+    const repInv = await client.query(`SELECT status, replaces_invoice_id, supply_date FROM invoices WHERE id = $1`, [resubmitRes.replacementInvoiceId]);
+    assert.equal(repInv.rows[0].status, 'submitted', 'Replacement document queued with status submitted');
+    assert.equal(repInv.rows[0].replaces_invoice_id, inv1.invoiceId, 'Replacement document links to rejected invoice');
+    assert.equal(String(repInv.rows[0].supply_date).slice(0, 10), String(order1.date.date).slice(0, 10), 'Must retain original transaction date');
 
     // Scenario B: ZATCA Reporting API returns NOT_REPORTED
     // Under ZATCA FAQ: Invoice is deemed invalid; taxpayer cancels via Credit Note 381 and generates replacement invoice
@@ -803,8 +884,8 @@ test('Discourse Edge Case 11: Ordinary Simplified Reporting Rejection Resubmissi
     const remedyRes = await remedyRejectedSimplifiedInvoice(client, inv1.invoiceId);
     assert.ok(remedyRes.creditNote, 'Must generate Credit Note 381 cancelling invalid invoice');
     assert.ok(remedyRes.replacementInvoice, 'Must generate fresh replacement invoice');
-    assert.equal(remedyRes.creditNote.icv, 12, 'Credit note advances ICV');
-    assert.equal(remedyRes.replacementInvoice.icv, 13, 'Replacement invoice advances ICV');
+    assert.ok(remedyRes.creditNote.icv > resubmitRes.icv, 'Credit note advances ICV');
+    assert.ok(remedyRes.replacementInvoice.icv > remedyRes.creditNote.icv, 'Replacement invoice advances ICV');
   } finally {
     client.release();
     await pool.end();

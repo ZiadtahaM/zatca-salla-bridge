@@ -773,6 +773,7 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         let tax_total: any = 15.0;
         let grand_total: any = 115.0;
 
+        let replaces_invoice_id: any = null;
         if (params.length === 5) {
           egs_unit_id = params[0];
           order_id = params[1];
@@ -781,6 +782,24 @@ export function attachStatefulRelationalTestDb(pool: any): void {
           icv = Number(params[3]);
           pih = 'NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODU4ZjgyYTgwMjdhMDY1ZDE4MGNkNGI3Nzg4MzBkNWU1NTc1OWQ2ODU5Nw==';
           invoice_hash = params[4];
+        } else if (params.length >= 15) {
+          [
+            egs_unit_id,
+            order_id,
+            idempotency_key,
+            uuid,
+            icv,
+            pih,
+            invoice_hash,
+            qr_code_payload,
+            signed_xml,
+            supply_date,
+            issue_timestamp,
+            replaces_invoice_id,
+            subtotal,
+            tax_total,
+            grand_total
+          ] = params;
         } else {
           [
             egs_unit_id,
@@ -817,7 +836,7 @@ export function attachStatefulRelationalTestDb(pool: any): void {
           status: normalized.includes("'reported'") ? 'reported' : (normalized.includes("'cleared'") ? 'cleared' : 'signed'),
           supply_date,
           issue_timestamp,
-          replaces_invoice_id: null,
+          replaces_invoice_id: replaces_invoice_id || null,
           subtotal,
           tax_total,
           grand_total,
@@ -826,23 +845,61 @@ export function attachStatefulRelationalTestDb(pool: any): void {
           updated_at: new Date()
         });
       } else {
-        const [
-          egs_unit_id,
-          order_id,
-          idempotency_key,
-          invoice_type,
-          uuid,
-          icv,
-          pih,
-          invoice_hash,
-          qr_code_payload,
-          signed_xml,
-          supply_date,
-          issue_timestamp,
-          subtotal,
-          tax_total,
-          grand_total
-        ] = params;
+        let egs_unit_id: any;
+        let order_id: any;
+        let idempotency_key: any;
+        let invoice_type: any;
+        let uuid: any;
+        let icv: any;
+        let pih: any;
+        let invoice_hash: any;
+        let qr_code_payload: any;
+        let signed_xml: any;
+        let supply_date: any;
+        let issue_timestamp: any;
+        let replaces_invoice_id: any = null;
+        let subtotal: any;
+        let tax_total: any;
+        let grand_total: any;
+
+        if (params.length >= 16) {
+          [
+            egs_unit_id,
+            order_id,
+            idempotency_key,
+            invoice_type,
+            uuid,
+            icv,
+            pih,
+            invoice_hash,
+            qr_code_payload,
+            signed_xml,
+            supply_date,
+            issue_timestamp,
+            replaces_invoice_id,
+            subtotal,
+            tax_total,
+            grand_total
+          ] = params;
+        } else {
+          [
+            egs_unit_id,
+            order_id,
+            idempotency_key,
+            invoice_type,
+            uuid,
+            icv,
+            pih,
+            invoice_hash,
+            qr_code_payload,
+            signed_xml,
+            supply_date,
+            issue_timestamp,
+            subtotal,
+            tax_total,
+            grand_total
+          ] = params;
+        }
         invoices.push({
           id,
           egs_unit_id,
@@ -859,7 +916,7 @@ export function attachStatefulRelationalTestDb(pool: any): void {
           status: normalized.includes("'reported'") ? 'reported' : (normalized.includes("'cleared'") ? 'cleared' : 'signed'),
           supply_date,
           issue_timestamp,
-          replaces_invoice_id: null,
+          replaces_invoice_id: replaces_invoice_id || null,
           subtotal,
           tax_total,
           grand_total,

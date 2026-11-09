@@ -39,14 +39,17 @@
 
 ### ZATCA E-Invoicing Technical Guidelines: Reporting Timeline & Recovery
 - **24-Hour Reporting Window**: Established by ZATCA E-Invoicing Integration Requirements and Detailed Technical Guidelines (not Article 53). Simplified tax invoices must be reported to FATOORA within 24 hours of issuance.
-- **Technical Reporting Rejection**: Under ZATCA published FAQs, if a simplified invoice is rejected upon reporting, the taxpayer corrects the error and resubmits the document for reporting; no duplicate invoice is issued to the buyer.
+- **Ordinary Simplified Reporting Rejection**: Under ZATCA E-Invoicing Detailed Technical Guidelines (pages 71–72), when an ordinary simplified tax invoice is rejected during reporting (within the 24-hour window), the taxpayer corrects the technical error and generates a corrected document submitted to FATOORA for reporting. The corrected document carries a brand new UUID, an incremented invoice counter value (ICV), a new unique cryptographic hash, and a new generation timestamp (IssueTime), while strictly retaining the original transaction date (IssueDate) and chaining to the EGS unit's immediately preceding document hash (PIH). Crucially, no duplicate invoice is delivered to the customer because the customer already holds the original valid simplified tax invoice issued at point of sale / delivery. The rejected document remains immutable in the audit ledger.
 - **Permanent Rejection (NOT_REPORTED)**: Under ZATCA FAQ, an invoice returning `NOT_REPORTED` is deemed invalid; the taxpayer cancels it via Credit Note (381) and generates a replacement invoice.
 - **Standard B2B Clearance Rejection**: Pre-issuance gate; rejected invoices are never delivered to buyers. Correction requires submitting a new invoice for clearance with fresh UUID, ICV, timestamp, and preceding document PIH.
 - **VAT Return Inclusion Invariant**: Technical failure or rejection in FATOORA reporting does not extinguish underlying VAT liability. All issued transactions must be included in the VAT return (Box 1) for the tax period.
 
 ### Article 66: Records Retention and Archiving
-- **Retention Period (Article 66(1))**: All invoices, credit notes, debit notes, and accounting records must be retained for at least six (6) years from the end of the relevant tax period (month or quarter) to which they relate.
-- **Capital Assets**: Retention is required for the statutory adjustment period (10 years for tangible capital assets, 6 years for others) plus five (5) additional years from the date of acquisition.
-- **Language**: Records and invoices must be maintained in Arabic (or bilingual with Arabic).
-- **In-Kingdom Terminal Access (Article 66(3))**: Electronic records must be accessible and producible upon request through an appropriate terminal or access point located in Saudi Arabia.
-- **Integrity**: Audit logs and invoice tables are protected with database-level immutable triggers (`trg_audit_logs_immutable`, `trg_invoices_immutable`) preventing tampering, alteration, or deletion.
+Under Article 66(1), read together with Article 52 of the Saudi VAT Implementing Regulations:
+1. **Standard Tax Records**: Standard invoices, books, records, and accounting documents must be maintained for at least six (6) years from the end of the relevant tax period (month or quarter) to which they relate.
+2. **Immovable Capital Assets**: Records relating to immovable capital assets permanently attached to land or real estate must be retained for the applicable ten-year adjustment period plus five additional years, resulting in a standard fifteen-year retention requirement from the date of acquisition.
+3. **Movable Tangible & Intangible Capital Assets**: Records relating to other capital assets, including movable tangible capital assets and intangible capital assets, must be retained for the applicable six-year adjustment period plus five additional years, resulting in a standard eleven-year retention requirement from the date of acquisition.
+4. **Modified Useful Life Assets**: If an asset has an adjustment period modified under Article 52 based on its expected useful life, records must be retained for that modified adjustment period plus five additional years.
+5. **Language**: Records and invoices must be maintained in Arabic (or bilingual with Arabic).
+6. **In-Kingdom Terminal Access (Article 66(3))**: Electronic records must be accessible and producible upon request through an appropriate terminal or access point located in Saudi Arabia.
+7. **Integrity & Tamper-Evidence**: Audit logs and invoice tables are protected with database-level immutable triggers (`trg_audit_logs_immutable`, `trg_invoices_immutable`) preventing tampering, alteration, or deletion.

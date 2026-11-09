@@ -44,12 +44,12 @@
 - **Standard B2B Clearance Rejection**: Pre-issuance gate; rejected invoices are never delivered to buyers. Correction requires submitting a new invoice for clearance with fresh UUID, ICV, timestamp, and preceding document PIH.
 - **VAT Return Inclusion Invariant**: Technical failure or rejection in FATOORA reporting does not extinguish underlying VAT liability. All issued transactions must be included in the VAT return (Box 1) for the tax period.
 
-### Article 66: Records Retention and Archiving
+### Article 66: Capital Asset Record Retention
 Under Article 66(1), read together with Article 52 of the Saudi VAT Implementing Regulations:
-1. **Standard Tax Records**: Standard invoices, books, records, and accounting documents must be maintained for at least six (6) years from the end of the relevant tax period (month or quarter) to which they relate.
-2. **Immovable Capital Assets**: Records relating to immovable capital assets permanently attached to land or real estate must be retained for the applicable ten-year adjustment period plus five additional years, resulting in a standard fifteen-year retention requirement from the date of acquisition.
-3. **Movable Tangible & Intangible Capital Assets**: Records relating to other capital assets, including movable tangible capital assets and intangible capital assets, must be retained for the applicable six-year adjustment period plus five additional years, resulting in a standard eleven-year retention requirement from the date of acquisition.
-4. **Modified Useful Life Assets**: If an asset has an adjustment period modified under Article 52 based on its expected useful life, records must be retained for that modified adjustment period plus five additional years.
-5. **Language**: Records and invoices must be maintained in Arabic (or bilingual with Arabic).
-6. **In-Kingdom Terminal Access (Article 66(3))**: Electronic records must be accessible and producible upon request through an appropriate terminal or access point located in Saudi Arabia.
-7. **Integrity & Tamper-Evidence**: Audit logs and invoice tables are protected with database-level immutable triggers (`trg_audit_logs_immutable`, `trg_invoices_immutable`) preventing tampering, alteration, or deletion.
+1. Standard invoices, books, records and accounting documents must be maintained for at least six years from the end of the relevant tax period.
+2. Records relating to immovable capital assets permanently attached to land or real estate must be retained for the applicable ten-year adjustment period plus five additional years, resulting in a standard fifteen-year retention period.
+3. Records relating to movable tangible and intangible capital assets must be retained for the applicable six-year adjustment period plus five additional years, resulting in a standard eleven-year retention period.
+4. Where Article 52 modifies the adjustment period due to a shorter useful life, the corresponding statutory retention calculation must be applied.
+The retention engine must calculate deadlines by asset category and acquisition date, rather than applying a single retention period to all capital assets.
+5. In-Kingdom Terminal Access (Article 66(3)): Electronic records must be accessible and producible upon request through an appropriate terminal or access point located in Saudi Arabia.
+6. Integrity & Tamper-Evidence: Audit logs and invoice tables are protected with database-level immutable triggers (`trg_audit_logs_immutable`, `trg_invoices_immutable`) preventing tampering, alteration, or deletion.

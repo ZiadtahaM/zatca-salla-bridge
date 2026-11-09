@@ -53,6 +53,7 @@ export const SallaOrderDataSchema = z.object({
     slug: z.string()
   }),
   payment_method: z.string().default('credit_card'),
+  payment_status: z.string().optional().nullable(),
   currency: z.string().default('SAR'),
   amounts: z.object({
     sub_total: SallaItemAmountSchema,
@@ -82,7 +83,29 @@ export const SallaSubscriptionDataSchema = z.object({
   expires_at: z.string().optional().nullable()
 }).passthrough();
 
+export const SallaShipmentDataSchema = z.object({
+  id: z.number().or(z.string()).optional(),
+  order_id: z.number().or(z.string()).optional(),
+  shipment_status: z.string().optional(),
+  status: z.string().optional(),
+  tracking_number: z.string().optional().nullable(),
+  courier_name: z.string().optional().nullable(),
+  actual_picked_up_at: z.string().optional().nullable()
+}).passthrough();
+
 export const SallaWebhookPayloadSchema = z.discriminatedUnion('event', [
+  z.object({
+    event: z.literal('shipment.created'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaShipmentDataSchema
+  }),
+  z.object({
+    event: z.literal('shipment.updated'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string(),
+    data: SallaShipmentDataSchema
+  }),
   z.object({
     event: z.literal('order.created'),
     merchant: z.number().or(z.string()),

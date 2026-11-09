@@ -1431,6 +1431,7 @@ export interface ProcessInvoiceOverrides {
   sellerNameArabic?: string;
   sellerVat?: string;
   sellerCrn?: string;
+  currency?: string;
   preservedIssueDate?: string;
   replacesInvoiceId?: string;
 }
@@ -1824,6 +1825,7 @@ export interface ProcessPartialCreditNoteOptions {
   sellerNameArabic?: string;
   sellerVat?: string;
   sellerCrn?: string;
+  currency?: string;
 }
 
 export async function processPartialCreditNote(

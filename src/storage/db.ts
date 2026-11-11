@@ -136,7 +136,6 @@ export async function initializeDatabaseSchema(): Promise<void> {
       ALTER TABLE invoices ALTER COLUMN pih TYPE VARCHAR(128);
       ALTER TABLE invoices ALTER COLUMN invoice_hash TYPE VARCHAR(128);
       ALTER TABLE invoices ADD COLUMN IF NOT EXISTS raw_order_payload JSONB;
-      ALTER TABLE order_sync_records ADD COLUMN IF NOT EXISTS order_payload JSONB;
 
       CREATE TABLE IF NOT EXISTS zatca_submissions (
           id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -282,6 +281,7 @@ export async function initializeDatabaseSchema(): Promise<void> {
           order_currency VARCHAR(10) DEFAULT 'SAR',
           customer_summary JSONB,
           eligibility_details JSONB,
+          order_payload JSONB,
           last_event_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           next_action TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -291,6 +291,7 @@ export async function initializeDatabaseSchema(): Promise<void> {
 
       ALTER TABLE order_sync_records ADD COLUMN IF NOT EXISTS internal_order_id VARCHAR(128);
       ALTER TABLE order_sync_records ADD COLUMN IF NOT EXISTS salla_refund_id VARCHAR(128);
+      ALTER TABLE order_sync_records ADD COLUMN IF NOT EXISTS order_payload JSONB;
       ALTER TABLE invoices ADD COLUMN IF NOT EXISTS salla_refund_id VARCHAR(128);
 
       CREATE INDEX IF NOT EXISTS idx_order_sync_merchant ON order_sync_records(merchant_id, sync_state);

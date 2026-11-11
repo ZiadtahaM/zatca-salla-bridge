@@ -58,6 +58,11 @@ jobs:
           ! grep -rn "BEGIN EC PRIVATE KEY" src/
           ! grep -rn "BEGIN RSA PRIVATE KEY" src/
 
+      - name: Run Database Migrations
+        env:
+          DATABASE_URL: postgres://zatca_admin:secret_zatca_password@127.0.0.1:5432/zatca_ledger
+        run: npm run migrate
+
       - name: Unit & Integration Test Suite (Full Invariant & Sync Tests)
         env:
           DATABASE_URL: postgres://zatca_admin:secret_zatca_password@127.0.0.1:5432/zatca_ledger

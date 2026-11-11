@@ -24,6 +24,7 @@ DO $$ BEGIN
         'reported',
         'reported_with_warnings',
         'rejected',
+        'rejected_reporting',
         'fallback_303'
     );
 EXCEPTION

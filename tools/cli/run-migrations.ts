@@ -23,7 +23,14 @@ export async function runMigrations(): Promise<void> {
       if (checkRes.rows.length === 0) {
         console.log(`Applying migration: ${file}...`);
         const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
-        await client.query(sql);
+        if (sql.includes('ALTER TYPE') && !sql.includes('$$')) {
+          const stmts = sql.split(';').map(s => s.trim()).filter(s => s.length > 0);
+          for (const stmt of stmts) {
+            await client.query(stmt);
+          }
+        } else {
+          await client.query(sql);
+        }
         await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [version]);
         console.log(`Successfully applied: ${file}`);
       } else {

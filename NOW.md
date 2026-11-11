@@ -31,6 +31,7 @@ The following table summarizes the verified technical capabilities and operation
 | Concurrency Protection | Session advisory lock `pg_advisory_xact_lock` | PostgreSQL 16 engine |
 | Audit Immutability | Trigger `trg_audit_logs_immutable` raises on updates/deletions | PostgreSQL 16 trigger |
 | Concurrency Benchmark | 1,000 invoices with 0 duplicate ICVs and intact PIH chains | Concurrency runner |
+| GitHub Actions CI | Commit 66e2747 passed all build, migration, test, and verification gates | Remote Ubuntu runner |
 | Network Isolation | Port 5432 bound to loopback `127.0.0.1` | Docker compose config |
 | Memory Sanitization | Zero-fill buffer wiping for decrypted secrets | Node.js crypto vault |
 
@@ -51,4 +52,4 @@ The development team focuses on three ordered priorities to complete the current
 | --- | --- | --- | --- |
 | Priority 1 | Stage C Source Code Hardening | Persist `raw_order_payload` in invoices, eliminate synthetic order fallbacks, enforce deterministic credit note idempotency, apply advisory transaction locks, and validate production secrets | Complete |
 | Priority 2 | Verification Expansion | Add regression tests for replacement insertion, synthetic ban, and credit note idempotency in `tests/discourse-2026-edge-cases.test.ts` | Complete |
-| Priority 3 | Release Pipeline | Execute full build, test suite, and verification gates, followed by Git commit and push to remote origin | Active |
+| Priority 3 | Release Pipeline | Execute full build, test suite, and verification gates, followed by Git commit and push to remote origin | Complete |

@@ -34,11 +34,13 @@ export async function initializeDatabaseSchema(): Promise<void> {
             'reported',
             'reported_with_warnings',
             'rejected',
+            'rejected_reporting',
             'fallback_303'
         );
       EXCEPTION
         WHEN duplicate_object THEN null;
       END $$;
+      ALTER TYPE invoice_status_enum ADD VALUE IF NOT EXISTS 'rejected_reporting';
 
       DO $$ BEGIN
         CREATE TYPE csid_environment_enum AS ENUM (
@@ -125,11 +127,16 @@ export async function initializeDatabaseSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_invoices_order ON invoices(order_id);
       CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status);
       CREATE INDEX IF NOT EXISTS idx_invoices_egs_created ON invoices(egs_unit_id, created_at DESC);
+      DROP INDEX IF EXISTS uq_invoices_order_original;
       CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_order_original
       ON invoices(egs_unit_id, order_id)
-      WHERE invoice_type IN ('tax_invoice', 'simplified_tax_invoice');
+      WHERE invoice_type IN ('tax_invoice', 'simplified_tax_invoice')
+        AND status NOT IN ('rejected', 'rejected_reporting')
+        AND replaces_invoice_id IS NULL;
       ALTER TABLE invoices ALTER COLUMN pih TYPE VARCHAR(128);
       ALTER TABLE invoices ALTER COLUMN invoice_hash TYPE VARCHAR(128);
+      ALTER TABLE invoices ADD COLUMN IF NOT EXISTS raw_order_payload JSONB;
+      ALTER TABLE order_sync_records ADD COLUMN IF NOT EXISTS order_payload JSONB;
 
       CREATE TABLE IF NOT EXISTS zatca_submissions (
           id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

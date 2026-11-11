@@ -150,11 +150,16 @@ export function reconcileHalalaRounding(
     const isGiftVoucher =
       (item as any).is_voucher === true ||
       (item as any).type === 'voucher_multi_purpose' ||
-      (item.name &&
-        (item.name.includes('كوبون') ||
-          item.name.includes('قسيمة') ||
-          item.name.toLowerCase().includes('voucher') ||
-          item.name.toLowerCase().includes('gift card')));
+      (item as any).type === 'digital_gift_card' ||
+      (item as any).tax_category === 'O' ||
+      (item as any).tax_category === 'VATEX-SA-OOS' ||
+      (typeof (item as any).sku === 'string' && ((item as any).sku.startsWith('VOUCHER-') || (item as any).sku.startsWith('GIFT-'))) ||
+      ((item as any).type === 'digital' && item.name && (
+        item.name.trim().toLowerCase() === 'voucher' ||
+        item.name.trim().toLowerCase() === 'gift card' ||
+        item.name.trim() === 'قسيمة شرائية' ||
+        item.name.trim() === 'بطاقة هدية'
+      ));
 
     let lineTaxCategory = 'S';
     let lineTaxPercent = 15.0;
@@ -1452,6 +1457,7 @@ export async function processSallaOrderIntoZatcaInvoice(
     const invoiceUuid = crypto.randomUUID();
 
     await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['egs_unit:' + egsUnitId]);
 
     try {
       if (idempotencyKey) {
@@ -1563,11 +1569,13 @@ export async function processSallaOrderIntoZatcaInvoice(
         `INSERT INTO invoices (
           egs_unit_id, order_id, idempotency_key, invoice_type, uuid,
           icv, pih, invoice_hash, qr_code_payload, signed_xml,
-          status, supply_date, issue_timestamp, replaces_invoice_id, subtotal, tax_total, grand_total
+          status, supply_date, issue_timestamp, replaces_invoice_id, subtotal, tax_total, grand_total,
+          raw_order_payload
         ) VALUES (
           $1, $2, $3, $4, $5,
           $6, $7, $8, $9, $10,
-          'signed', $11, $12, $13, $14, $15, $16
+          'signed', $11, $12, $13, $14, $15, $16,
+          $17
         ) RETURNING id`,
         [
           egs.id,
@@ -1585,7 +1593,8 @@ export async function processSallaOrderIntoZatcaInvoice(
           overrides?.replacesInvoiceId || null,
           lineExtensionTotal,
           declaredTaxTotal,
-          grandTotal
+          grandTotal,
+          JSON.stringify(order)
         ]
       );
 
@@ -1634,6 +1643,7 @@ export async function processSallaRefundIntoZatcaCreditNote(
     const creditNoteUuid = crypto.randomUUID();
 
     await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['egs_unit:' + egsUnitId]);
 
     try {
       if (idempotencyKey) {
@@ -1759,11 +1769,12 @@ export async function processSallaRefundIntoZatcaCreditNote(
         egs_unit_id, order_id, idempotency_key, invoice_type, uuid,
         icv, pih, invoice_hash, qr_code_payload, signed_xml,
         status, supply_date, issue_timestamp, replaces_invoice_id,
-        subtotal, tax_total, grand_total
+        subtotal, tax_total, grand_total, raw_order_payload
       ) VALUES (
         $1, $2, $3, 'credit_note', $4,
         $5, $6, $7, $8, $9,
-        'signed', $10, $11, $12, $13, $14, $15
+        'signed', $10, $11, $12, $13, $14, $15,
+        $16
       ) RETURNING id`,
       [
         egs.id,
@@ -1780,7 +1791,8 @@ export async function processSallaRefundIntoZatcaCreditNote(
         originalInvoice.id,
         lineExtensionTotal,
         declaredTaxTotal,
-        grandTotal
+        grandTotal,
+        JSON.stringify(order)
       ]
     );
 
@@ -1842,6 +1854,7 @@ export async function processPartialCreditNote(
     const creditNoteUuid = crypto.randomUUID();
 
     await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['egs_unit:' + egsUnitId]);
 
     try {
       if (options.idempotencyKey) {
@@ -2116,7 +2129,7 @@ export async function resubmitCorrectedZatcaInvoice(
 ): Promise<GeneratedInvoiceResult> {
   const rejectedRes = await client.query(
     `SELECT i.id, i.uuid, i.egs_unit_id, i.order_id, i.idempotency_key, i.icv, i.invoice_hash,
-            i.status, i.invoice_type, i.signed_xml, i.currency, u.merchant_id
+            i.status, i.invoice_type, i.signed_xml, i.currency, i.raw_order_payload, u.merchant_id
      FROM invoices i
      JOIN egs_units u ON i.egs_unit_id = u.id
      WHERE i.id = $1`,
@@ -2138,33 +2151,30 @@ export async function resubmitCorrectedZatcaInvoice(
   if (correctedOrder) {
     orderToProcess = correctedOrder;
   } else {
-    const syncRes = await client.query(
-      `SELECT order_amount, order_currency FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
-      [rejected.merchant_id, rejected.order_id]
-    );
-    const amount = Number(syncRes.rows?.[0]?.order_amount || 115);
-    const currency = syncRes.rows?.[0]?.order_currency || rejected.currency || 'SAR';
-    const subtotal = Number((amount / 1.15).toFixed(2));
-    const tax = Number((amount - subtotal).toFixed(2));
+    let authenticPayload: any = rejected.raw_order_payload;
+    if (!authenticPayload && rejected.merchant_id && rejected.order_id) {
+      const syncRes = await client.query(
+        `SELECT order_payload FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
+        [rejected.merchant_id, rejected.order_id]
+      );
+      authenticPayload = syncRes.rows?.[0]?.order_payload;
+    }
 
-    orderToProcess = {
-      id: Number(rejected.order_id) || 1001,
-      currency,
-      customer: { first_name: 'Customer', email: 'customer@example.com' },
-      items: [
-        {
-          id: 1,
-          name: 'Corrected Item Supply',
-          quantity: 1,
-          price: { amount: subtotal, currency }
-        }
-      ],
-      amounts: {
-        sub_total: { amount: subtotal, currency },
-        tax: { amount: { amount: tax, currency } },
-        total: { amount, currency }
+    if (!authenticPayload) {
+      throw new Error(
+        `CANNOT_RETRY_WITHOUT_SOURCE_DATA: Authentic Salla order payload missing for rejected invoice ${rejected.id} (order ${rejected.order_id}). Cannot construct synthetic order data without violating ZATCA compliance.`
+      );
+    }
+
+    if (typeof authenticPayload === 'string') {
+      try {
+        orderToProcess = JSON.parse(authenticPayload) as SallaOrderData;
+      } catch {
+        orderToProcess = authenticPayload as unknown as SallaOrderData;
       }
-    } as any;
+    } else {
+      orderToProcess = authenticPayload as SallaOrderData;
+    }
   }
 
   return await processSallaOrderIntoZatcaInvoice(
@@ -2209,11 +2219,13 @@ export async function remedyRejectedSimplifiedInvoice(
   }
 
   // 1. Issue Credit Note (381) cancelling the invalid invoice in the ledger
+  const cancelIdempotency = `${rejected.idempotency_key}:cancel_remedy`;
   const creditNote = await processPartialCreditNote(client, rejected.egs_unit_id, {
     originalInvoiceId: rejected.id,
     refundAmount: Number(rejected.grand_total),
     returnReason: 'إلغاء فاتورة ضريبية مبسطة مرفوضة من منصة فاتورة (ZATCA NOT_REPORTED Cancellation)',
-    currency: rejected.currency || 'SAR'
+    currency: rejected.currency || 'SAR',
+    idempotencyKey: cancelIdempotency
   });
 
   // 2. Issue replacement Simplified Tax Invoice
@@ -2265,7 +2277,7 @@ export async function resubmitSimplifiedInvoiceForReporting(
 ): Promise<SimplifiedReportingResubmissionResult> {
   const rejectedRes = await client.query(
     `SELECT i.id, i.uuid, i.egs_unit_id, i.order_id, i.idempotency_key, i.icv, i.invoice_hash,
-            i.status, i.invoice_type, i.supply_date, i.currency, i.grand_total, u.merchant_id
+            i.status, i.invoice_type, i.supply_date, i.currency, i.grand_total, i.raw_order_payload, u.merchant_id
      FROM invoices i
      JOIN egs_units u ON i.egs_unit_id = u.id
      WHERE i.id = $1`,
@@ -2286,33 +2298,30 @@ export async function resubmitSimplifiedInvoiceForReporting(
   if (correctedOrder) {
     orderToProcess = correctedOrder;
   } else {
-    const syncRes = await client.query(
-      `SELECT order_amount, order_currency FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
-      [rejected.merchant_id, rejected.order_id]
-    );
-    const amount = Number(syncRes.rows?.[0]?.order_amount || rejected.grand_total || 115);
-    const currency = syncRes.rows?.[0]?.order_currency || rejected.currency || 'SAR';
-    const subtotal = Number((amount / 1.15).toFixed(2));
-    const tax = Number((amount - subtotal).toFixed(2));
+    let authenticPayload: any = rejected.raw_order_payload;
+    if (!authenticPayload && rejected.merchant_id && rejected.order_id) {
+      const syncRes = await client.query(
+        `SELECT order_payload FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
+        [rejected.merchant_id, rejected.order_id]
+      );
+      authenticPayload = syncRes.rows?.[0]?.order_payload;
+    }
 
-    orderToProcess = {
-      id: Number(rejected.order_id) || 1001,
-      currency,
-      customer: { first_name: 'Customer', email: 'customer@example.com' },
-      items: [
-        {
-          id: 1,
-          name: 'Corrected Item Supply',
-          quantity: 1,
-          price: { amount: subtotal, currency }
-        }
-      ],
-      amounts: {
-        sub_total: { amount: subtotal, currency },
-        tax: { amount: { amount: tax, currency } },
-        total: { amount, currency }
+    if (!authenticPayload) {
+      throw new Error(
+        `CANNOT_RETRY_WITHOUT_SOURCE_DATA: Authentic Salla order payload missing for reporting-rejected invoice ${rejected.id} (order ${rejected.order_id}). Cannot construct synthetic order data without violating ZATCA compliance.`
+      );
+    }
+
+    if (typeof authenticPayload === 'string') {
+      try {
+        orderToProcess = JSON.parse(authenticPayload) as SallaOrderData;
+      } catch {
+        orderToProcess = authenticPayload as unknown as SallaOrderData;
       }
-    } as any;
+    } else {
+      orderToProcess = authenticPayload as SallaOrderData;
+    }
   }
 
   const newIdempotency = `${rejected.idempotency_key}:reporting_retry:${Date.now()}`;

@@ -95,6 +95,12 @@ export async function fetchSallaOrdersPage(
   if (options.toDate) url.searchParams.set('to_date', options.toDate);
   if (options.status) url.searchParams.set('status', options.status);
 
+  if (process.env.NODE_ENV === 'production') {
+    if (!accessToken || accessToken.includes('demo') || accessToken.includes('test')) {
+      throw new Error('PRODUCTION_CREDENTIAL_ERROR: Valid Salla OAuth access token required in production environment.');
+    }
+  }
+
   // In test or offline demo environment without real token and without customFetch, return synthetic store orders
   if (!options.customFetch && (accessToken.includes('demo') || accessToken.includes('test') || process.env.NODE_ENV === 'test')) {
     return {
@@ -164,6 +170,9 @@ export async function runStoreReconciliation(
 }> {
   // 1. Get or refresh Salla tokens
   const tokens = await refreshSallaTokenIfNeeded(client, merchantId);
+  if (process.env.NODE_ENV === 'production' && !tokens?.accessToken) {
+    throw new Error(`AUTHENTICATION_REQUIRED: No active Salla OAuth access token found for merchant ${merchantId} in production.`);
+  }
   const accessToken = tokens?.accessToken || 'demo_token';
 
   // 2. Check for existing running job to resume, or create new

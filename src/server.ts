@@ -57,7 +57,30 @@ export function buildServer() {
   return app;
 }
 
+export function validateProductionEnvironment(): void {
+  if (process.env.NODE_ENV !== 'production') {
+    return;
+  }
+  const issues: string[] = [];
+  const masterKey = process.env.ENCRYPTION_MASTER_KEY;
+  if (!masterKey || masterKey.includes('default_zatca') || masterKey.length < 32) {
+    issues.push('ENCRYPTION_MASTER_KEY is missing or insecure');
+  }
+  const sessionSecret = process.env.SESSION_SECRET;
+  if (!sessionSecret || sessionSecret.includes('dev_zatca') || sessionSecret.length < 32) {
+    issues.push('SESSION_SECRET is missing or insecure');
+  }
+  const webhookSecret = process.env.SALLA_WEBHOOK_SECRET;
+  if (!webhookSecret || webhookSecret.includes('dev_salla') || webhookSecret.length < 16) {
+    issues.push('SALLA_WEBHOOK_SECRET is missing or insecure');
+  }
+  if (issues.length > 0) {
+    throw new Error(`PRODUCTION_STARTUP_FAILURE: Insecure environment configuration: ${issues.join(', ')}`);
+  }
+}
+
 export async function startServer() {
+  validateProductionEnvironment();
   const server = buildServer();
   const port = parseInt(process.env.PORT || '3000', 10);
   const host = process.env.HOST || '0.0.0.0';

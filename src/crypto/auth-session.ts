@@ -1,7 +1,16 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { FastifyRequest, FastifyReply } from 'fastify';
 
-const DEFAULT_SECRET = process.env.SESSION_SECRET || 'dev_zatca_session_signing_secret_32bytes_min';
+export function getSessionSecret(): string {
+  const secret = process.env.SESSION_SECRET;
+  if (process.env.NODE_ENV === 'production') {
+    if (!secret || secret.includes('dev_zatca') || secret.length < 32) {
+      throw new Error('FATAL: SESSION_SECRET must be set to a secure secret in production environment.');
+    }
+  }
+  return secret || 'dev_zatca_session_signing_secret_32bytes_min';
+}
+
 const SESSION_COOKIE_NAME = 'zatca_merchant_session';
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -10,21 +19,21 @@ export interface SignedSessionPayload {
   expiresAt: number;
 }
 
-export function signMerchantSessionToken(merchantId: string, secret = DEFAULT_SECRET): string {
+export function signMerchantSessionToken(merchantId: string, secret = getSessionSecret()): string {
   const expiresAt = Date.now() + SESSION_TTL_MS;
   const data = `${merchantId}:${expiresAt}`;
   const hmac = createHmac('sha256', secret).update(data).digest('base64url');
   return `${merchantId}.${expiresAt}.${hmac}`;
 }
 
-export function signReceiptToken(invoiceId: string, secret = DEFAULT_SECRET): string {
+export function signReceiptToken(invoiceId: string, secret = getSessionSecret()): string {
   return createHmac('sha256', secret).update(`receipt:${invoiceId}`).digest('base64url');
 }
 
 export function verifyReceiptToken(
   invoiceId: string,
   token: string,
-  secret = DEFAULT_SECRET
+  secret = getSessionSecret()
 ): boolean {
   if (!token || typeof token !== 'string') return false;
   const expected = signReceiptToken(invoiceId, secret);
@@ -36,7 +45,7 @@ export function verifyReceiptToken(
 
 export function verifyMerchantSessionToken(
   token: string,
-  secret = DEFAULT_SECRET
+  secret = getSessionSecret()
 ): { valid: boolean; merchantId?: string; reason?: string } {
   if (!token || typeof token !== 'string') {
     return { valid: false, reason: 'Missing token' };

@@ -1,4 +1,5 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { DOMParser } from '@xmldom/xmldom';
 import { pool } from '../storage/db.js';
 import { authenticateMerchantRequest } from '../crypto/auth-session.js';
 
@@ -74,53 +75,106 @@ export async function vatReturnExportRoutes(fastify: FastifyInstance): Promise<v
           unreportedCount++;
         }
 
-        // Determine VAT Category from XML or amounts
-        let category = 'S';
-        if (xml.includes('UN/ECE 5305">O</cbc:ID>') || xml.includes('>O</cbc:ID>') || xml.includes('<cbc:ID>O</cbc:ID>')) {
-          category = 'O';
-        } else if (xml.includes('UN/ECE 5305">E</cbc:ID>') || xml.includes('>E</cbc:ID>') || xml.includes('<cbc:ID>E</cbc:ID>')) {
-          category = 'E';
-        } else if (xml.includes('UN/ECE 5305">Z</cbc:ID>') || xml.includes('>Z</cbc:ID>') || xml.includes('<cbc:ID>Z</cbc:ID>')) {
-          category = 'Z';
-        } else if (vat === 0 && subtotal > 0) {
-          category = 'Z';
+        const parser = new DOMParser({
+          errorHandler: { warning: () => {}, error: () => {}, fatalError: () => {} }
+        });
+        let doc: Document | null = null;
+        if (xml) {
+          try {
+            doc = parser.parseFromString(xml, 'text/xml');
+          } catch {
+            doc = null;
+          }
         }
 
         // Detect export supplies based on customer country outside SA
         let isExport = false;
-        const customerPartyMatch = xml.match(/<cac:AccountingCustomerParty>[\s\S]*?<\/cac:AccountingCustomerParty>/);
-        if (customerPartyMatch) {
-          const countryMatch = customerPartyMatch[0].match(/<cbc:IdentificationCode[^>]*>([A-Za-z]{2})<\/cbc:IdentificationCode>/);
-          if (countryMatch && countryMatch[1].toUpperCase() !== 'SA') {
-            isExport = true;
+        if (doc) {
+          const customerParty = doc.getElementsByTagName('cac:AccountingCustomerParty')[0];
+          if (customerParty) {
+            const countryCodes = customerParty.getElementsByTagName('cbc:IdentificationCode');
+            if (countryCodes.length > 0) {
+              const code = countryCodes[0]?.textContent?.trim().toUpperCase();
+              if (code && code !== 'SA') {
+                isExport = true;
+              }
+            }
           }
         }
 
-        if (type === 'credit_note') {
-          if (category === 'S') {
-            box1AdjustmentsNet += subtotal;
-            box1AdjustmentsVat += vat;
-          } else if (category === 'Z') {
-            if (isExport) {
-              box4AdjustmentsNet += subtotal;
+        // Extract TaxSubtotal nodes from cac:TaxTotal
+        const subtotals: Array<{ category: string; taxableAmount: number; taxAmount: number }> = [];
+
+        if (doc) {
+          const taxTotals = doc.getElementsByTagName('cac:TaxTotal');
+          for (let t = 0; t < taxTotals.length; t++) {
+            const taxTotal = taxTotals[t];
+            const taxSubtotalElements = taxTotal.getElementsByTagName('cac:TaxSubtotal');
+            for (let s = 0; s < taxSubtotalElements.length; s++) {
+              const subElem = taxSubtotalElements[s];
+              const taxableEl = subElem.getElementsByTagName('cbc:TaxableAmount')[0];
+              const taxEl = subElem.getElementsByTagName('cbc:TaxAmount')[0];
+              const catEl = subElem.getElementsByTagName('cac:TaxCategory')[0]?.getElementsByTagName('cbc:ID')[0];
+
+              const catId = catEl?.textContent?.trim().toUpperCase() || 'S';
+              const taxableVal = Number(taxableEl?.textContent?.trim()) || 0;
+              const taxVal = Number(taxEl?.textContent?.trim()) || 0;
+
+              subtotals.push({
+                category: catId,
+                taxableAmount: taxableVal,
+                taxAmount: taxVal
+              });
+            }
+          }
+        }
+
+        if (subtotals.length > 0) {
+          for (const sub of subtotals) {
+            if (type === 'credit_note') {
+              if (sub.category === 'S') {
+                box1AdjustmentsNet += sub.taxableAmount;
+                box1AdjustmentsVat += sub.taxAmount;
+              } else if (sub.category === 'Z') {
+                if (isExport) {
+                  box4AdjustmentsNet += sub.taxableAmount;
+                } else {
+                  box3AdjustmentsNet += sub.taxableAmount;
+                }
+              } else {
+                box5AdjustmentsNet += sub.taxableAmount;
+              }
+            } else {
+              if (sub.category === 'S') {
+                box1SalesNet += sub.taxableAmount;
+                box1SalesVat += sub.taxAmount;
+              } else if (sub.category === 'Z') {
+                if (isExport) {
+                  box4ExportsNet += sub.taxableAmount;
+                } else {
+                  box3ZeroRatedNet += sub.taxableAmount;
+                }
+              } else {
+                box5ExemptNet += sub.taxableAmount;
+              }
+            }
+          }
+        } else {
+          let fallbackCat = vat > 0 ? 'S' : 'Z';
+          if (type === 'credit_note') {
+            if (fallbackCat === 'S') {
+              box1AdjustmentsNet += subtotal;
+              box1AdjustmentsVat += vat;
             } else {
               box3AdjustmentsNet += subtotal;
             }
           } else {
-            box5AdjustmentsNet += subtotal;
-          }
-        } else {
-          if (category === 'S') {
-            box1SalesNet += subtotal;
-            box1SalesVat += vat;
-          } else if (category === 'Z') {
-            if (isExport) {
-              box4ExportsNet += subtotal;
+            if (fallbackCat === 'S') {
+              box1SalesNet += subtotal;
+              box1SalesVat += vat;
             } else {
               box3ZeroRatedNet += subtotal;
             }
-          } else {
-            box5ExemptNet += subtotal;
           }
         }
       }

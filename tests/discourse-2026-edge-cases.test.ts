@@ -966,3 +966,246 @@ test('Discourse Edge Case 12: VAT Return Box 1 Inclusion Invariant: Unreported a
     await pool.end();
   }
 });
+
+test('Discourse Edge Case 13: Scoped Replacement Insertion on Live PostgreSQL', async () => {
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
+  try {
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase13');
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const encSec = encryptVaultSecret('sec_test_edge13');
+
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
+      ) VALUES (
+        'salla_scoped_store', 'متجر سلة التجريبي', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
+      ) ON CONFLICT (merchant_id) DO UPDATE SET store_name = EXCLUDED.store_name`,
+      [encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
+
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        'salla_scoped_store', 'main', 'EGS-DISCOURSE-SCOPED-01', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 10, 'INITIAL_HASH_EDGE13',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge13', 'POS'
+      ) RETURNING id`,
+      [encKey, certPem, encSec]
+    );
+    const egsId = egsRes.rows[0].id;
+
+    // 1. Issue original invoice
+    const order1 = createBaseMockOrder();
+    order1.id = 771001;
+    const inv1 = await processSallaOrderIntoZatcaInvoice(client, egsId, order1, 'idemp_scoped_01');
+    assert.equal(inv1.icv, 11);
+
+    // 2. Mark as rejected
+    await client.query(`UPDATE invoices SET status = 'rejected' WHERE id = $1`, [inv1.invoiceId]);
+
+    // 3. Issue replacement invoice referencing original
+    const inv2 = await processSallaOrderIntoZatcaInvoice(
+      client,
+      egsId,
+      order1,
+      'idemp_scoped_01:replacement',
+      { replacesInvoiceId: inv1.invoiceId }
+    );
+
+    assert.equal(inv2.icv, 12, 'Replacement invoice increments ICV cleanly');
+    assert.notEqual(inv2.invoiceUuid, inv1.invoiceUuid, 'Replacement has distinct UUID');
+    assert.equal(inv2.pih, inv1.invoiceHash, 'PIH chains to rejected original');
+  } finally {
+    client.release();
+    await pool.end();
+  }
+});
+
+test('Discourse Edge Case 14: Remedy Rejected Simplified Invoice Has Deterministic Credit Note Idempotency Key', async () => {
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
+  try {
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase14');
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const encSec = encryptVaultSecret('sec_test_edge14');
+
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
+      ) VALUES (
+        'salla_idem_store', 'متجر سلة التجريبي', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
+      ) ON CONFLICT (merchant_id) DO UPDATE SET store_name = EXCLUDED.store_name`,
+      [encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
+
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        'salla_idem_store', 'main', 'EGS-DISCOURSE-IDEM-01', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 40, 'INITIAL_HASH_EDGE14',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge14', 'POS'
+      ) RETURNING id`,
+      [encKey, certPem, encSec]
+    );
+    const egsId = egsRes.rows[0].id;
+
+    // Issue original simplified invoice
+    const order = createBaseMockOrder();
+    order.id = 772001;
+    const inv = await processSallaOrderIntoZatcaInvoice(client, egsId, order, 'idemp_idem_01');
+    await client.query(`UPDATE invoices SET status = 'rejected_reporting' WHERE id = $1`, [inv.invoiceId]);
+
+    // First remedy call generates credit note + replacement
+    const remedy1 = await remedyRejectedSimplifiedInvoice(client, inv.invoiceId);
+    assert.ok(remedy1.creditNote.invoiceId);
+    assert.equal(remedy1.creditNote.icv, 42);
+
+    // Second remedy retry must return the same credit note without creating duplicates
+    const remedy2 = await remedyRejectedSimplifiedInvoice(client, inv.invoiceId);
+    assert.equal(remedy2.creditNote.invoiceId, remedy1.creditNote.invoiceId, 'Must return existing credit note on retry');
+    assert.equal(remedy2.creditNote.icv, remedy1.creditNote.icv, 'ICV must not be burned on duplicate remedy');
+  } finally {
+    client.release();
+    await pool.end();
+  }
+});
+
+test('Discourse Edge Case 15: Missing Source Order Data Fails Closed with CANNOT_RETRY_WITHOUT_SOURCE_DATA', async () => {
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
+  try {
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase15');
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const encSec = encryptVaultSecret('sec_test_edge15');
+
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
+      ) VALUES (
+        'salla_nosource_store', 'متجر سلة التجريبي', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
+      ) ON CONFLICT (merchant_id) DO UPDATE SET store_name = EXCLUDED.store_name`,
+      [encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
+
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        'salla_nosource_store', 'main', 'EGS-DISCOURSE-NOSOURCE-01', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 50, 'INITIAL_HASH_EDGE15',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge15', 'POS'
+      ) RETURNING id`,
+      [encKey, certPem, encSec]
+    );
+    const egsId = egsRes.rows[0].id;
+
+    // Insert an invoice directly without raw_order_payload
+    const invRes = await client.query(
+      `INSERT INTO invoices (
+        egs_unit_id, order_id, idempotency_key, invoice_type, uuid,
+        icv, pih, invoice_hash, qr_code_payload, signed_xml,
+        status, supply_date, issue_timestamp, subtotal, tax_total, grand_total,
+        raw_order_payload
+      ) VALUES (
+        $1, '773001', 'idemp_missing_source', 'simplified_tax_invoice', 'uuid-missing-src-01',
+        51, 'PIH_DUMMY', 'HASH_DUMMY', 'QR_DUMMY', '<Invoice/>',
+        'rejected', '2026-11-10', '2026-11-10T10:00:00Z', 100, 15, 115,
+        NULL
+      ) RETURNING id`,
+      [egsId]
+    );
+    const invId = invRes.rows[0].id;
+
+    // Resubmission without correctedOrder and without raw_order_payload must fail closed
+    await assert.rejects(
+      async () => {
+        await resubmitCorrectedZatcaInvoice(client, invId);
+      },
+      (err: any) => {
+        return err.message.includes('CANNOT_RETRY_WITHOUT_SOURCE_DATA');
+      }
+    );
+  } finally {
+    client.release();
+    await pool.end();
+  }
+});
+
+test('Discourse Edge Case 16: Refined Voucher Exemption Rules Require Structured Classification', async () => {
+  // Test physical merchandise containing 'voucher' in name is NOT exempt
+  const physicalOrder = createBaseMockOrder();
+  physicalOrder.items = [
+    {
+      id: 1,
+      name: 'Voucher Leather Organizer Wallet',
+      quantity: 1,
+      price: { amount: 230, currency: 'SAR' }
+    }
+  ];
+  (physicalOrder.items[0] as any).type = 'physical';
+
+  const xmlPhysical = buildUblXmlFromSallaOrder({
+    order: physicalOrder,
+    uuid: 'uuid-edge-16-a',
+    icv: 60,
+    pih: 'PIH_DUMMY',
+    issueDate: '2026-11-10',
+    issueTime: '10:00:00Z',
+    sellerNameArabic: 'متجر التجزئة',
+    sellerVat: '300075588700003',
+    sellerCrn: '1010010000',
+    isB2C: true
+  });
+
+  // Physical item must be Standard Rated (15%)
+  assert.ok(xmlPhysical.includes('<cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">S</cbc:ID>'), 'Physical item must be Category S');
+  assert.ok(!xmlPhysical.includes('VATEX-SA-OOS'), 'Physical item must NOT have VATEX-SA-OOS exemption');
+
+  // Test structured digital multi-purpose voucher IS exempt
+  const voucherOrder = createBaseMockOrder();
+  voucherOrder.items = [
+    {
+      id: 2,
+      name: 'Digital Voucher Card',
+      quantity: 1,
+      price: { amount: 500, currency: 'SAR' }
+    }
+  ];
+  (voucherOrder.items[0] as any).is_voucher = true;
+  (voucherOrder.items[0] as any).type = 'voucher_multi_purpose';
+
+  const xmlVoucher = buildUblXmlFromSallaOrder({
+    order: voucherOrder,
+    uuid: 'uuid-edge-16-b',
+    icv: 61,
+    pih: 'PIH_DUMMY',
+    issueDate: '2026-11-10',
+    issueTime: '10:00:00Z',
+    sellerNameArabic: 'متجر التجزئة',
+    sellerVat: '300075588700003',
+    sellerCrn: '1010010000',
+    isB2C: true
+  });
+
+  // Voucher item must be Out-of-scope (Category O with VATEX-SA-OOS)
+  assert.ok(xmlVoucher.includes('<cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">O</cbc:ID>'), 'Voucher must be Category O');
+  assert.ok(xmlVoucher.includes('VATEX-SA-OOS'), 'Voucher must have VATEX-SA-OOS exemption code');
+});

@@ -106,7 +106,15 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
     }
 
     const signatureHeader = request.headers['x-salla-signature'] as string | undefined;
-    const webhookSecret = process.env.SALLA_WEBHOOK_SECRET || 'dev_salla_webhook_secret';
+    let webhookSecret = process.env.SALLA_WEBHOOK_SECRET;
+    if (process.env.NODE_ENV === 'production') {
+      if (!webhookSecret || webhookSecret.includes('dev_salla') || webhookSecret.length < 16) {
+        throw new Error('FATAL: SALLA_WEBHOOK_SECRET must be configured in production environment.');
+      }
+    }
+    if (!webhookSecret) {
+      webhookSecret = 'dev_salla_webhook_secret';
+    }
 
     const isValid = verifySallaWebhookSignature(rawBodyBuffer, signatureHeader, webhookSecret);
     if (!isValid && process.env.NODE_ENV === 'production') {

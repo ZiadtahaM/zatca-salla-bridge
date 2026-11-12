@@ -54,14 +54,18 @@ export async function vatReturnExportRoutes(fastify: FastifyInstance): Promise<v
       // Calculate VAT Return Summary Aggregates by statutory VAT Category (Form VAT 01)
       let box1SalesNet = 0;
       let box1SalesVat = 0;
-      let box1AdjustmentsNet = 0; // Credit notes on Standard Rated supplies
+      let box1AdjustmentsNet = 0; // Credit notes on Standard Rated supplies (Box 1 Adjustments)
       let box1AdjustmentsVat = 0;
       let box3ZeroRatedNet = 0; // Box 3: Zero-Rated Domestic Sales
       let box3AdjustmentsNet = 0;
       let box4ExportsNet = 0; // Box 4: Exports of Goods & Services
       let box4AdjustmentsNet = 0;
-      let box5ExemptNet = 0; // Box 5: Exempt & Out-of-Scope Supplies
+      let box5ExemptNet = 0; // Box 5: Exempt Supplies (Articles 29-30)
       let box5AdjustmentsNet = 0;
+      let outOfScopeNet = 0; // Out of Scope supplies (Category O)
+      let outOfScopeAdjustmentsNet = 0;
+      let unclassifiedNet = 0;
+      let unclassifiedCount = 0;
       let unreportedCount = 0;
 
       for (const row of rows) {
@@ -127,6 +131,28 @@ export async function vatReturnExportRoutes(fastify: FastifyInstance): Promise<v
               });
             }
           }
+
+          // If header TaxSubtotal was missing, extract from line items
+          if (subtotals.length === 0) {
+            const lines = type === 'credit_note'
+              ? doc.getElementsByTagName('cac:CreditNoteLine')
+              : doc.getElementsByTagName('cac:InvoiceLine');
+            for (let l = 0; l < lines.length; l++) {
+              const line = lines[l];
+              const lineExtEl = line.getElementsByTagName('cbc:LineExtensionAmount')[0];
+              const catEl = line.getElementsByTagName('cac:ClassifiedTaxCategory')[0]?.getElementsByTagName('cbc:ID')[0];
+              const catId = catEl?.textContent?.trim().toUpperCase();
+              const lineAmount = Number(lineExtEl?.textContent?.trim()) || 0;
+              if (catId) {
+                const lineTax = catId === 'S' ? Number((lineAmount * 0.15).toFixed(2)) : 0;
+                subtotals.push({
+                  category: catId,
+                  taxableAmount: lineAmount,
+                  taxAmount: lineTax
+                });
+              }
+            }
+          }
         }
 
         if (subtotals.length > 0) {
@@ -141,8 +167,13 @@ export async function vatReturnExportRoutes(fastify: FastifyInstance): Promise<v
                 } else {
                   box3AdjustmentsNet += sub.taxableAmount;
                 }
-              } else {
+              } else if (sub.category === 'E') {
                 box5AdjustmentsNet += sub.taxableAmount;
+              } else if (sub.category === 'O') {
+                outOfScopeAdjustmentsNet += sub.taxableAmount;
+              } else {
+                unclassifiedNet += sub.taxableAmount;
+                unclassifiedCount++;
               }
             } else {
               if (sub.category === 'S') {
@@ -154,28 +185,20 @@ export async function vatReturnExportRoutes(fastify: FastifyInstance): Promise<v
                 } else {
                   box3ZeroRatedNet += sub.taxableAmount;
                 }
-              } else {
+              } else if (sub.category === 'E') {
                 box5ExemptNet += sub.taxableAmount;
+              } else if (sub.category === 'O') {
+                outOfScopeNet += sub.taxableAmount;
+              } else {
+                unclassifiedNet += sub.taxableAmount;
+                unclassifiedCount++;
               }
             }
           }
         } else {
-          let fallbackCat = vat > 0 ? 'S' : 'Z';
-          if (type === 'credit_note') {
-            if (fallbackCat === 'S') {
-              box1AdjustmentsNet += subtotal;
-              box1AdjustmentsVat += vat;
-            } else {
-              box3AdjustmentsNet += subtotal;
-            }
-          } else {
-            if (fallbackCat === 'S') {
-              box1SalesNet += subtotal;
-              box1SalesVat += vat;
-            } else {
-              box3ZeroRatedNet += subtotal;
-            }
-          }
+          // Document has no parseable XML tax subtotal; record under unclassified ledger review
+          unclassifiedNet += subtotal;
+          unclassifiedCount++;
         }
       }
 
@@ -194,7 +217,9 @@ export async function vatReturnExportRoutes(fastify: FastifyInstance): Promise<v
       csvLines.push(`صافي ضريبة المبيعات المستحقة السداد (Net VAT Payable),${(box1SalesNet - box1AdjustmentsNet).toFixed(2)},${netVatPayable.toFixed(2)},-`);
       csvLines.push(`المبيعات المحلية الخاضعة للنسبة الصفرية (Box 3 Zero-Rated Domestic Sales),${box3ZeroRatedNet.toFixed(2)},0.00,-${box3AdjustmentsNet.toFixed(2)}`);
       csvLines.push(`صادرات السلع والخدمات (Box 4 Exports of Goods & Services),${box4ExportsNet.toFixed(2)},0.00,-${box4AdjustmentsNet.toFixed(2)}`);
-      csvLines.push(`التوريدات المعفاة وخارج نطاق الضريبة (Box 5 Exempt & Out-of-Scope Supplies),${box5ExemptNet.toFixed(2)},0.00,-${box5AdjustmentsNet.toFixed(2)}`);
+      csvLines.push(`التوريدات المعفاة من الضريبة (Box 5 Exempt Supplies - Articles 29-30),${box5ExemptNet.toFixed(2)},0.00,-${box5AdjustmentsNet.toFixed(2)}`);
+      csvLines.push(`التوريدات خارج نطاق الضريبة (Out of Scope Supplies - Category O),${outOfScopeNet.toFixed(2)},0.00,-${outOfScopeAdjustmentsNet.toFixed(2)}`);
+      csvLines.push(`المعاملات غير المصنفة / قيد التدقيق (Unclassified / Audit Review Required),${unclassifiedNet.toFixed(2)},0.00,عدد: ${unclassifiedCount}`);
       csvLines.push(`عدد الفواتير غير المعتمدة أو المعلقة (Unreported Invoices Count),${unreportedCount},${unreportedCount === 0 ? 'مكتمل وجاهز للتقديم' : 'تنبيه: يجب اعتماد الفواتير قبل تقديم الإقرار'}`);
       csvLines.push('# --------------------------------------------------------------------------------');
       csvLines.push('');

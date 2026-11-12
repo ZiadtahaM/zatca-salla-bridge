@@ -1405,33 +1405,6 @@ export function generateComplianceDocumentSet(options: {
 }
 
 
-const egsMutexMap = new Map<string, Promise<any>>();
-
-export async function withEgsMutex<T>(egsUnitId: string, fn: () => Promise<T>): Promise<T> {
-  while (egsMutexMap.has(egsUnitId)) {
-    try {
-      await egsMutexMap.get(egsUnitId);
-    } catch {
-      // previous invocation completed, continue chain
-    }
-  }
-
-  let resolveMutex: () => void;
-  const mutexPromise = new Promise<void>((resolve) => {
-    resolveMutex = resolve;
-  });
-  egsMutexMap.set(egsUnitId, mutexPromise);
-
-  try {
-    return await fn();
-  } finally {
-    if (egsMutexMap.get(egsUnitId) === mutexPromise) {
-      egsMutexMap.delete(egsUnitId);
-    }
-    resolveMutex!();
-  }
-}
-
 export interface ProcessInvoiceOverrides {
   sellerNameArabic?: string;
   sellerVat?: string;
@@ -1439,6 +1412,7 @@ export interface ProcessInvoiceOverrides {
   currency?: string;
   preservedIssueDate?: string;
   replacesInvoiceId?: string;
+  idempotencyKey?: string;
 }
 
 export async function processSallaOrderIntoZatcaInvoice(
@@ -1448,16 +1422,15 @@ export async function processSallaOrderIntoZatcaInvoice(
   idempotencyKey: string,
   overrides?: ProcessInvoiceOverrides
 ): Promise<GeneratedInvoiceResult> {
-  return withEgsMutex(egsUnitId, async () => {
-    const isB2C = !isB2bCustomer(order.customer?.tax_number);
-    const now = new Date();
-    const issueDate = overrides?.preservedIssueDate || now.toISOString().split('T')[0];
-    const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
-    const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
-    const invoiceUuid = crypto.randomUUID();
+  const isB2C = !isB2bCustomer(order.customer?.tax_number);
+  const now = new Date();
+  const issueDate = overrides?.preservedIssueDate || now.toISOString().split('T')[0];
+  const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
+  const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
+  const invoiceUuid = crypto.randomUUID();
 
-    await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['egs_unit:' + egsUnitId]);
+  await client.query('BEGIN');
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['egs_unit:' + egsUnitId]);
 
     try {
       if (idempotencyKey) {
@@ -1482,6 +1455,7 @@ export async function processSallaOrderIntoZatcaInvoice(
           };
         }
       }
+
       const egsRes = await client.query(
         `SELECT e.id, e.merchant_id, e.branch_id, e.current_icv, e.last_document_hash,
                 e.private_key_pem, e.csid_secret, e.certificate, e.expires_at, e.csid_environment,
@@ -1623,7 +1597,6 @@ export async function processSallaOrderIntoZatcaInvoice(
       await client.query('ROLLBACK');
       throw err;
     }
-  });
 }
 
 export async function processSallaRefundIntoZatcaCreditNote(
@@ -1634,16 +1607,15 @@ export async function processSallaRefundIntoZatcaCreditNote(
   returnReason: string = 'Customer return or order refund',
   overrides?: ProcessInvoiceOverrides
 ): Promise<GeneratedInvoiceResult> {
-  return withEgsMutex(egsUnitId, async () => {
-    const isB2C = !isB2bCustomer(order.customer?.tax_number);
-    const now = new Date();
-    const issueDate = now.toISOString().split('T')[0];
-    const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
-    const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
-    const creditNoteUuid = crypto.randomUUID();
+  const isB2C = !isB2bCustomer(order.customer?.tax_number);
+  const now = new Date();
+  const issueDate = now.toISOString().split('T')[0];
+  const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
+  const issueDateTimeIsoZ = `${issueDate}T${issueTime}`;
+  const creditNoteUuid = crypto.randomUUID();
 
-    await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['egs_unit:' + egsUnitId]);
+  await client.query('BEGIN');
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['egs_unit:' + egsUnitId]);
 
     try {
       if (idempotencyKey) {
@@ -1668,6 +1640,7 @@ export async function processSallaRefundIntoZatcaCreditNote(
           };
         }
       }
+
     const origRes = await client.query(
       `SELECT id, uuid, icv, status
        FROM invoices
@@ -1821,7 +1794,6 @@ export async function processSallaRefundIntoZatcaCreditNote(
     await client.query('ROLLBACK');
     throw err;
   }
-  });
 }
 
 export interface ProcessPartialCreditNoteOptions {
@@ -1845,8 +1817,7 @@ export async function processPartialCreditNote(
   egsUnitId: string,
   options: ProcessPartialCreditNoteOptions
 ): Promise<GeneratedInvoiceResult> {
-  return withEgsMutex(egsUnitId, async () => {
-    const returnReason = options.returnReason || 'Partial customer refund';
+  const returnReason = options.returnReason || 'Partial customer refund';
     const now = new Date();
     const issueDate = now.toISOString().split('T')[0];
     const issueTime = `${now.toISOString().split('T')[1].slice(0, 8)}Z`;
@@ -2037,9 +2008,7 @@ export async function processPartialCreditNote(
 
     const idempotency = options.idempotencyKey || `cn_part_${originalInvoice.id}_${Date.now()}`;
 
-    const dbReplacesInvoiceId = options.originalInvoiceId && originalInvoice.status !== 'external_historical'
-      ? originalInvoice.id
-      : null;
+    const dbReplacesInvoiceId = null; // Credit notes do not replace invoices; they reference them via billing reference
 
     const cnRes = await client.query(
       `INSERT INTO invoices (
@@ -2108,7 +2077,6 @@ export async function processPartialCreditNote(
     await client.query('ROLLBACK');
     throw err;
   }
-  });
 }
 
 /**
@@ -2145,7 +2113,31 @@ export async function resubmitCorrectedZatcaInvoice(
     throw new Error(`Invoice ${rejectedInvoiceId} has status '${rejected.status}'. Only rejected documents can be corrected via new document identity.`);
   }
 
-  const newIdempotency = `${rejected.idempotency_key}:resubmit:${Date.now()}`;
+  const newIdempotency = overrides?.idempotencyKey || `${rejected.idempotency_key}:replacement`;
+
+  // Deterministic Idempotency: Check if replacement already exists by idempotency key
+  const existingRep = await client.query(
+    `SELECT id, uuid, icv, pih, invoice_hash, qr_code_payload, signed_xml, invoice_type
+     FROM invoices
+     WHERE idempotency_key = $1
+        OR (replaces_invoice_id = $2 AND invoice_type IN ('simplified_tax_invoice', 'tax_invoice') AND idempotency_key = $1)
+     LIMIT 1`,
+    [newIdempotency, rejected.id]
+  );
+
+  if (existingRep.rows.length > 0) {
+    const row = existingRep.rows[0];
+    return {
+      invoiceId: row.id,
+      invoiceUuid: row.uuid,
+      icv: Number(row.icv),
+      pih: row.pih,
+      invoiceHash: row.invoice_hash,
+      qrCodeBase64: row.qr_code_payload,
+      signedXml: row.signed_xml,
+      isB2C: row.invoice_type === 'simplified_tax_invoice'
+    };
+  }
 
   let orderToProcess: SallaOrderData;
   if (correctedOrder) {
@@ -2177,12 +2169,17 @@ export async function resubmitCorrectedZatcaInvoice(
     }
   }
 
+  const resubmitOverrides: ProcessInvoiceOverrides = {
+    ...overrides,
+    replacesInvoiceId: rejected.id
+  };
+
   return await processSallaOrderIntoZatcaInvoice(
     client,
     rejected.egs_unit_id,
     orderToProcess,
     newIdempotency,
-    overrides
+    resubmitOverrides
   );
 }
 
@@ -2228,12 +2225,17 @@ export async function remedyRejectedSimplifiedInvoice(
     idempotencyKey: cancelIdempotency
   });
 
-  // 2. Issue replacement Simplified Tax Invoice
+  // 2. Issue replacement Simplified Tax Invoice with explicit replacesInvoiceId and deterministic idempotency
+  const resubmitOverrides: ProcessInvoiceOverrides = {
+    ...overrides,
+    idempotencyKey: overrides?.idempotencyKey || `${rejected.idempotency_key}:remedy_replacement`,
+    replacesInvoiceId: rejected.id
+  };
   const replacementInvoice = await resubmitCorrectedZatcaInvoice(
     client,
     rejectedInvoiceId,
     correctedOrder,
-    overrides
+    resubmitOverrides
   );
 
   return { creditNote, replacementInvoice };
@@ -2294,6 +2296,33 @@ export async function resubmitSimplifiedInvoiceForReporting(
     throw new Error(`Invoice ${invoiceId} has status '${rejected.status}'. Only reporting-rejected invoices require resubmission.`);
   }
 
+  const newIdempotency = `${rejected.idempotency_key}:reporting_replacement`;
+
+  // Deterministic Idempotency: Check if replacement already exists by replaces_invoice_id or deterministic idempotency key
+  const existingRep = await client.query(
+    `SELECT id, uuid, icv, pih, invoice_hash, qr_code_payload, signed_xml, invoice_type, status
+     FROM invoices
+     WHERE replaces_invoice_id = $1 OR idempotency_key = $2
+     LIMIT 1`,
+    [rejected.id, newIdempotency]
+  );
+  if (existingRep.rows.length > 0) {
+    const row = existingRep.rows[0];
+    return {
+      invoiceId: row.id,
+      invoiceUuid: row.uuid,
+      originalInvoiceId: rejected.id,
+      replacementInvoiceId: row.id,
+      replacementUuid: row.uuid,
+      icv: Number(row.icv),
+      invoiceHash: row.invoice_hash,
+      pih: row.pih,
+      status: row.status === 'signed' ? 'resubmitted_for_reporting' : row.status,
+      isCustomerDeliveryRequired: false,
+      message: 'Existing replacement document retrieved with preserved identity; queued for reporting without duplicate customer delivery'
+    };
+  }
+
   let orderToProcess: SallaOrderData;
   if (correctedOrder) {
     orderToProcess = correctedOrder;
@@ -2324,7 +2353,6 @@ export async function resubmitSimplifiedInvoiceForReporting(
     }
   }
 
-  const newIdempotency = `${rejected.idempotency_key}:reporting_retry:${Date.now()}`;
   const originalSupplyDate = rejected.supply_date
     ? (rejected.supply_date instanceof Date ? rejected.supply_date.toISOString().split('T')[0] : String(rejected.supply_date).split('T')[0])
     : undefined;

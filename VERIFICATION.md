@@ -7,7 +7,7 @@ This document records the verification framework for zatca-salla-bridge. Every c
 ### Tier 1: Local Automated Test Suite
 This tier exercises pure business logic, data models, schema validation, and unit-level calculations in Node.js.
 Execution command: `npm test`
-Current coverage: 81 tests passing across 13 test suites.
+Current coverage: 89 tests passing across 14 test suites.
 Properties validated:
 - Halala rounding balance satisfying BR-CO-10 and BR-CO-15.
 - ECDSA secp256k1 cryptographic signature generation over SHA-256 invoice digests.
@@ -21,12 +21,15 @@ This tier executes against a real PostgreSQL 16 engine running in Docker on 127.
 Execution commands:
 - Database migrations: applied via Docker psql scripts.
 - Schema verification: `npm run verify`
+- Live PostgreSQL lifecycle and concurrency suite: `npx tsx --test tests/real-postgres-lifecycle-and-concurrency.test.ts`
 - Concurrency benchmark: `npm run benchmark`
 Properties validated:
 - Monotonic sequential invoice counter incrementation per EGS unit under advisory transaction locks.
 - Unbroken Previous Invoice Hash chaining across sequential records.
+- Partial unique index enforcement on `uq_invoices_order_original`, blocking duplicate original invoices with error code 23505.
+- Scoped replacement insertion on `(egs_unit_id, order_id)` when `replaces_invoice_id` is set.
+- Remediation retry idempotency returning identical records without duplicate credit notes or replacement invoices.
 - Immutability trigger protection on audit_logs (`trg_audit_logs_immutable`), raising TAMPER_EVIDENT_PROTECTION on update or delete attempts.
-- Scoped partial uniqueness on `(egs_unit_id, order_id)` via Migration 004, enabling replacement invoices for rejected orders without unique violation errors.
 - Strict state machine transitions on order synchronization records, enforcing thirteen canonical states and rejecting invalid jumps.
 Boundary limitation: Tier 2 does not prove network protocol compatibility with ZATCA Fatoora servers or external Salla webhook delivery.
 

@@ -1073,10 +1073,18 @@ test('Discourse Edge Case 14: Remedy Rejected Simplified Invoice Has Determinist
     assert.ok(remedy1.creditNote.invoiceId);
     assert.equal(remedy1.creditNote.icv, 42);
 
-    // Second remedy retry must return the same credit note without creating duplicates
+    // Second remedy retry must return the same credit note and same replacement invoice without creating duplicates
     const remedy2 = await remedyRejectedSimplifiedInvoice(client, inv.invoiceId);
     assert.equal(remedy2.creditNote.invoiceId, remedy1.creditNote.invoiceId, 'Must return existing credit note on retry');
-    assert.equal(remedy2.creditNote.icv, remedy1.creditNote.icv, 'ICV must not be burned on duplicate remedy');
+    assert.equal(remedy2.creditNote.icv, remedy1.creditNote.icv, 'ICV must not be burned on duplicate remedy credit note');
+    assert.equal(remedy2.replacementInvoice.invoiceId, remedy1.replacementInvoice.invoiceId, 'Must return existing replacement invoice on retry');
+    assert.equal(remedy2.replacementInvoice.icv, remedy1.replacementInvoice.icv, 'ICV must not be burned on duplicate remedy replacement invoice');
+
+    const allReplacements = await client.query(
+      `SELECT id FROM invoices WHERE replaces_invoice_id = $1`,
+      [inv.invoiceId]
+    );
+    assert.equal(allReplacements.rows.length, 1, 'Exactly one replacement invoice must exist for the rejected invoice');
   } finally {
     client.release();
     await pool.end();

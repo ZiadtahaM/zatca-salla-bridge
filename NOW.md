@@ -22,16 +22,20 @@ The following table summarizes the verified technical capabilities and operation
 
 | Area | Verified Metric | Environment |
 | :--- | :--- | :--- |
-| Automated Test Suites | 85 passing tests across 13 test suites | Node.js test runner |
+| Automated Test Suites | 89 passing tests across 14 test suites | Node.js test runner |
 | Master Verification Gates | 16 passing gates | `npm run verify` |
+| Live PostgreSQL Lifecycle Suite | 4 passing invariant gates | Live PostgreSQL 16 on Docker |
 | TypeScript Diagnostics | 0 compiler errors | `npx tsc --noEmit` |
 | Database Migrations | Migrations 001 through 004 applied | PostgreSQL 16 on Docker |
+| Automatic ZATCA Dispatch | Real sandbox submission connected in webhook path | Salla webhook route |
+| DLQ Retry Scheduler | Active retry loop registered on startup and intervals | Background service loop |
+| Tax Category Allocation | Explicit S, Z, E, O tax categories without synthetic defaults | VAT export and generator |
 | Replacement Constraints | Scoped partial uniqueness on `(egs_unit_id, order_id)` | PostgreSQL 16 index |
 | Source Order Storage | Raw JSONB persistence on invoices and sync records | PostgreSQL 16 tables |
 | Concurrency Protection | Session advisory lock `pg_advisory_xact_lock` | PostgreSQL 16 engine |
 | Audit Immutability | Trigger `trg_audit_logs_immutable` raises on updates/deletions | PostgreSQL 16 trigger |
 | Concurrency Benchmark | 1,000 invoices with 0 duplicate ICVs and intact PIH chains | Concurrency runner |
-| GitHub Actions CI | Commit 66e2747 passed all build, migration, test, and verification gates | Remote Ubuntu runner |
+| GitHub Actions CI | Full build, migrations, test suites, and gates passing | Remote Ubuntu runner |
 | Network Isolation | Port 5432 bound to loopback `127.0.0.1` | Docker compose config |
 | Memory Sanitization | Zero-fill buffer wiping for decrypted secrets | Node.js crypto vault |
 
@@ -50,6 +54,6 @@ The development team focuses on three ordered priorities to complete the current
 
 | Sequence | Milestone Phase | Objectives and Deliverables | Current Status |
 | --- | --- | --- | --- |
-| Priority 1 | Stage C Source Code Hardening | Persist `raw_order_payload` in invoices, eliminate synthetic order fallbacks, enforce deterministic credit note idempotency, apply advisory transaction locks, and validate production secrets | Complete |
-| Priority 2 | Verification Expansion | Add regression tests for replacement insertion, synthetic ban, and credit note idempotency in `tests/discourse-2026-edge-cases.test.ts` | Complete |
+| Priority 1 | Webhook-to-ZATCA Pipeline | Direct sandbox submission in webhook, active DLQ scheduling, and correct tax-event gates | Complete |
+| Priority 2 | PostgreSQL Invariant Testing | Live PostgreSQL 16 tests for partial index rejection, scoped replacements, remedy idempotency, and concurrent advisory locks | Complete |
 | Priority 3 | Release Pipeline | Execute full build, test suite, and verification gates, followed by Git commit and push to remote origin | Complete |

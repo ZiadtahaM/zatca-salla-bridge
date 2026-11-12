@@ -644,8 +644,27 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       return { rows: [{ max_icv: maxIcv }], rowCount: 1 };
     }
 
+    if (normalized.includes('FROM invoices') && normalized.includes('WHERE idempotency_key = $1') && normalized.includes('replaces_invoice_id = $2')) {
+      const idem = params[0];
+      const repId = params[1];
+      const rows = invoices.filter((i) => i.idempotency_key === idem || (i.replaces_invoice_id === repId && i.invoice_type !== 'credit_note' && i.idempotency_key === idem));
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('FROM invoices WHERE replaces_invoice_id = $1')) {
+      const rows = invoices.filter((i) => i.replaces_invoice_id === params[0] && i.invoice_type !== 'credit_note');
+      return { rows, rowCount: rows.length };
+    }
+
     if (normalized.includes('FROM invoices WHERE idempotency_key = $1')) {
       const rows = invoices.filter((i) => i.idempotency_key === params[0]);
+      return { rows, rowCount: rows.length };
+    }
+
+    if (normalized.includes('FROM invoices') && (normalized.includes('replaces_invoice_id = $1 OR idempotency_key = $2') || normalized.includes('replaces_invoice_id = $1'))) {
+      const repId = params[0];
+      const idem = params.length > 1 ? params[1] : null;
+      const rows = invoices.filter((i) => (i.replaces_invoice_id === repId && i.invoice_type !== 'credit_note') || (idem && i.idempotency_key === idem));
       return { rows, rowCount: rows.length };
     }
 

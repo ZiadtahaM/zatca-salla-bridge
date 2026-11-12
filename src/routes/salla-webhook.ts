@@ -20,7 +20,8 @@ import {
   isMerchantSubscriptionActive
 } from '../services/salla-oauth.js';
 import { dispatchMerchantAlert } from '../services/alert-dispatcher.js';
-import { transitionOrderSyncState } from '../services/sync-service.js';
+import { transitionOrderSyncState, SyncState } from '../services/sync-service.js';
+import { submitInvoiceToFatoora, FatooraDispatchResult } from '../services/fatoora-dispatcher.js';
 
 export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post('/webhooks/salla/authorize', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -681,77 +682,84 @@ export async function processSallaWebhookPayload(
     }
 
     const paymentMethod = orderData.payment_method?.toLowerCase() || '';
+    const paymentStatus = (orderData.payment_status || (payload.data as any)?.payment_status || '').toLowerCase();
     const statusSlug = orderData.status?.slug?.toLowerCase() || '';
     const isDeferredPaymentMethod = ['cod', 'cash_on_delivery', 'bank', 'bank_transfer'].includes(paymentMethod);
-    const isPaymentReceived = (orderData.payment_status?.toLowerCase() === 'paid') ||
-                              ((payload.data as any)?.payment_status?.toLowerCase() === 'paid') ||
-                              (payload.event === 'order.payment.updated' && (payload.data as any)?.status?.toLowerCase() === 'paid');
+    const isExplicitlyPaid = paymentStatus === 'paid' ||
+                             (payload.event === 'order.payment.updated' && (payload.data as any)?.status?.toLowerCase() === 'paid');
+    const isExplicitlyUnpaid = ['pending', 'unpaid', 'failed', 'refunded', 'partially_paid'].includes(paymentStatus);
+    const isPaymentReceived = isExplicitlyPaid || (!isDeferredPaymentMethod && !isExplicitlyUnpaid);
 
-    // Under Article 23(1) and Article 23(2)(b) of the GCC Unified VAT Agreement:
-    // VAT becomes due on the earliest applicable date of supply, invoice issuance, or receipt of consideration (to extent received).
-    // Under Saudi VAT Implementing Regulations Article 53(1)(a)(2) and Article 53(7)(a)(2) & (b):
-    // Consideration received before supply triggers immediate tax invoice issuance.
-    // Unpaid deferred orders (Cash on Delivery or unverified Bank Transfer) hold invoice issuance
-    // until transportation commences (Saudi VAT Regs Article 27) or physical delivery is verified.
-    if (isDeferredPaymentMethod && !isPaymentReceived) {
-      let verifiedDeliveredSlugs = ['completed', 'delivered'];
-      try {
-        const merchantSettingsRes = await client.query(
-          `SELECT cod_fulfillment_statuses, status_event_mapping FROM merchant_tokens WHERE merchant_id = $1`,
-          [merchantId]
-        );
-        if (merchantSettingsRes.rows.length > 0) {
-          const mapping = merchantSettingsRes.rows[0].status_event_mapping;
-          if (mapping && typeof mapping === 'object') {
-            for (const [slug, mappedEvent] of Object.entries(mapping)) {
-              if (mappedEvent === 'delivered') {
-                verifiedDeliveredSlugs.push(slug.toLowerCase().trim());
-              }
+    let verifiedDeliveredSlugs = ['completed', 'delivered'];
+    try {
+      const merchantSettingsRes = await client.query(
+        `SELECT cod_fulfillment_statuses, status_event_mapping FROM merchant_tokens WHERE merchant_id = $1`,
+        [merchantId]
+      );
+      if (merchantSettingsRes.rows.length > 0) {
+        const mapping = merchantSettingsRes.rows[0].status_event_mapping;
+        if (mapping && typeof mapping === 'object') {
+          for (const [slug, mappedEvent] of Object.entries(mapping)) {
+            if (mappedEvent === 'delivered') {
+              verifiedDeliveredSlugs.push(slug.toLowerCase().trim());
             }
-          } else if (merchantSettingsRes.rows[0].cod_fulfillment_statuses) {
-            const customSlugs = merchantSettingsRes.rows[0].cod_fulfillment_statuses;
-            if (Array.isArray(customSlugs)) {
-              for (const s of customSlugs) {
-                const norm = String(s).toLowerCase().trim();
-                const nonDeliveryKeywords = ['pack', 'prep', 'ready', 'pickup', 'progress', 'review', 'hold', 'pend'];
-                if (!nonDeliveryKeywords.some(kw => norm.includes(kw))) {
-                  verifiedDeliveredSlugs.push(norm);
-                }
+          }
+        } else if (merchantSettingsRes.rows[0].cod_fulfillment_statuses) {
+          const customSlugs = merchantSettingsRes.rows[0].cod_fulfillment_statuses;
+          if (Array.isArray(customSlugs)) {
+            for (const s of customSlugs) {
+              const norm = String(s).toLowerCase().trim();
+              const nonDeliveryKeywords = ['pack', 'prep', 'ready', 'pickup', 'progress', 'review', 'hold', 'pend'];
+              if (!nonDeliveryKeywords.some(kw => norm.includes(kw))) {
+                verifiedDeliveredSlugs.push(norm);
               }
             }
           }
         }
-      } catch {
-        // Fallback to standard verified delivery slugs
       }
+    } catch {
+      // Fallback to standard verified delivery slugs
+    }
 
-      const isFinalizedStatus = verifiedDeliveredSlugs.includes(statusSlug);
+    const isFinalizedStatus = verifiedDeliveredSlugs.includes(statusSlug);
 
-      if (!isFinalizedStatus) {
-        await transitionOrderSyncState(client, {
-          merchantId,
-          orderId,
-          internalOrderId,
-          toState: 'awaiting_processing',
-          sourceEvent: payload.event,
-          orderAmount: orderData.amounts?.total?.amount || null,
-          orderCurrency: orderData.currency || 'SAR',
-          reason: `طلب دفع عند الاستلام أو حوالة بنكية مؤجل حتى تحقق التوصيل الفعلي أو وصول الحالة إلى: ${verifiedDeliveredSlugs.join(' أو ')}`,
-          isRecoverable: false,
-          nextAction: 'بانتظار تأكيد التوصيل الفعلي عبر شركة الشحن أو تحديث الحالة إلى تسليم / Awaiting delivery completion'
-        }).catch(() => {});
+    // Universal payment / supply verification gate:
+    // Under Article 23(1) and Article 23(2)(b) of the GCC Unified VAT Agreement:
+    // VAT becomes due on the earliest applicable date of supply, invoice issuance, or receipt of consideration.
+    // Unpaid deferred orders (COD / Bank Transfer) or electronic orders awaiting payment authorization
+    // hold invoice issuance until consideration is confirmed received or physical delivery is verified.
+    if (!isPaymentReceived && !isFinalizedStatus) {
+      const isHoldDeferred = isDeferredPaymentMethod;
+      await transitionOrderSyncState(client, {
+        merchantId,
+        orderId,
+        internalOrderId,
+        toState: 'awaiting_processing',
+        sourceEvent: payload.event,
+        orderAmount: orderData.amounts?.total?.amount || null,
+        orderCurrency: orderData.currency || 'SAR',
+        reason: isHoldDeferred
+          ? `طلب دفع عند الاستلام أو حوالة بنكية مؤجل حتى تحقق التوصيل الفعلي أو وصول الحالة إلى: ${verifiedDeliveredSlugs.join(' أو ')}`
+          : `طلب بانتظار تأكيد استلام المقابل المالي (حالة الدفع: ${paymentStatus || 'pending'})`,
+        isRecoverable: false,
+        nextAction: isHoldDeferred
+          ? 'بانتظار تأكيد التوصيل الفعلي عبر شركة الشحن أو تحديث الحالة إلى تسليم / Awaiting delivery completion'
+          : 'بانتظار تأكيد عملية الدفع من سلة (order.payment.updated)'
+      }).catch(() => {});
 
-        return {
-          statusCode: 200,
-          body: {
-            status: 'deferred_payment_hold',
-            order_id: orderId,
-            payment_method: orderData.payment_method,
-            order_status: orderData.status?.slug,
-            reason: `COD and Bank Transfer orders are deferred until status reaches verified delivery: ${verifiedDeliveredSlugs.join(', ')}`
-          }
-        };
-      }
+      return {
+        statusCode: 200,
+        body: {
+          status: isHoldDeferred ? 'deferred_payment_hold' : 'unconfirmed_payment_hold',
+          order_id: orderId,
+          payment_method: orderData.payment_method,
+          payment_status: paymentStatus || 'pending',
+          order_status: orderData.status?.slug,
+          reason: isHoldDeferred
+            ? `COD and Bank Transfer orders are deferred until status reaches verified delivery: ${verifiedDeliveredSlugs.join(', ')}`
+            : `Order payment is pending (${paymentStatus || 'unpaid'}); invoice deferred until consideration is confirmed or delivery is complete`
+        }
+      };
     }
 
     if (isB2bCustomer(orderData.customer?.tax_number)) {
@@ -952,12 +960,34 @@ export async function processSallaWebhookPayload(
     );
   }
 
+  // Automatic ZATCA Pipeline Submission: Report simplified (B2C) or clear standard (B2B)
+  let dispatchResult: FatooraDispatchResult | null = null;
+  try {
+    dispatchResult = await submitInvoiceToFatoora(client, result.invoiceId);
+  } catch (dispErr: any) {
+    // submitInvoiceToFatoora classifies failures and records to zatca_dlq; safety fallback:
+    dispatchResult = {
+      invoiceId: result.invoiceId,
+      invoiceUuid: result.invoiceUuid,
+      status: 'queued_dlq_retry',
+      httpStatus: 503,
+      message: dispErr.message
+    };
+  }
+
+  const finalZatcaStatus = dispatchResult?.status || (result.isB2C ? 'reported' : 'cleared');
+  const syncState: SyncState = (finalZatcaStatus === 'reported')
+    ? 'successfully_reported'
+    : (finalZatcaStatus === 'cleared')
+      ? 'successfully_cleared'
+      : (finalZatcaStatus === 'queued_dlq_retry' ? 'temporarily_failed' : 'permanently_failed');
+
   await transitionOrderSyncState(client, {
     merchantId,
     orderId,
     internalOrderId,
     sallaRefundId,
-    toState: 'successfully_processed',
+    toState: syncState,
     sourceEvent: payload.event,
     invoiceId: result.invoiceId,
     invoiceUuid: result.invoiceUuid,
@@ -972,10 +1002,12 @@ export async function processSallaWebhookPayload(
       country: orderData.shipping?.address?.country || 'SA'
     },
     reason: isRefundOrCancel
-      ? `تم إصدار إشعار دائن مشفر كود 381 بنجاح برقم تسلسلي (${result.icv})`
-      : `تم إصدار وتوقيع الفاتورة مشفرة بنجاح برقم تسلسلي (${result.icv})`,
-    isRecoverable: true,
-    nextAction: result.isB2C ? 'بانتظار التقرير خلال 24 ساعة لهيئة الزكاة' : 'بانتظار الاعتماد الفوري'
+      ? `تم إصدار إشعار دائن مشفر كود 381 بنجاح وإرساله لهيئة الزكاة (${finalZatcaStatus}) برقم تسلسلي (${result.icv})`
+      : `تم إصدار وتوقيع الفاتورة مشفرة وإرسالها لهيئة الزكاة (${finalZatcaStatus}) برقم تسلسلي (${result.icv})`,
+    isRecoverable: finalZatcaStatus === 'queued_dlq_retry',
+    nextAction: finalZatcaStatus === 'queued_dlq_retry'
+      ? 'بانتظار إعادة المحاولة التلقائية عبر طابور المعالجة (DLQ)'
+      : (finalZatcaStatus === 'rejected_reporting' ? 'بانتظار معالجة الرفض عبر إصدار إشعار دائن بديل' : 'مكتمل ومعتمد لدى هيئة الزكاة')
   }).catch(() => {});
 
   return {
@@ -987,10 +1019,11 @@ export async function processSallaWebhookPayload(
       invoice_uuid: result.invoiceUuid,
       icv: result.icv,
       invoice_hash: result.invoiceHash,
-      qr_code: result.qrCodeBase64,
+      qr_code: dispatchResult?.qrCode || result.qrCodeBase64,
       is_b2c: result.isB2C,
       document_type: isRefundOrCancel ? 'credit_note' : (result.isB2C ? 'simplified_tax_invoice' : 'tax_invoice'),
-      zatca_status: result.isB2C ? 'ready_for_reporting_24h' : 'queued_for_clearance'
+      zatca_status: finalZatcaStatus,
+      dispatch_result: dispatchResult
     }
   };
 }

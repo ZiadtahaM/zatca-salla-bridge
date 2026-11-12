@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import rawBody from 'fastify-raw-body';
 import { sallaWebhookRoutes, drainWebhookQueue } from './routes/salla-webhook.js';
+import { processPendingDlqRetries } from './services/fatoora-dispatcher.js';
 import { onboardingRoutes } from './routes/onboarding-route.js';
 import { validatorRoutes } from './routes/validator-route.js';
 import { opsRoutes } from './routes/ops-route.js';
@@ -98,13 +99,28 @@ export async function startServer() {
       server.log.warn(`Webhook queue drain warning on startup: ${queueErr.message}`);
     }
 
-    // Start background webhook queue drainer (runs every 5 seconds)
+    // Process pending ZATCA DLQ retries on startup
+    try {
+      const dlqRes = await processPendingDlqRetries(pool);
+      if (dlqRes.retriedCount > 0) {
+        process.stdout.write(`Processed ${dlqRes.retriedCount} pending ZATCA DLQ retry(ies) on startup (${dlqRes.failedCount} errors)\n`);
+      }
+    } catch (dlqErr: any) {
+      server.log.warn(`ZATCA DLQ retry warning on startup: ${dlqErr.message}`);
+    }
+
+    // Start background webhook queue drainer and ZATCA DLQ retry worker (runs every 5 seconds)
     if (process.env.NODE_ENV !== 'test') {
       const queueTimer = setInterval(async () => {
         try {
           await drainWebhookQueue();
         } catch {
           // Quiet background polling
+        }
+        try {
+          await processPendingDlqRetries(pool);
+        } catch {
+          // Quiet background DLQ retry
         }
       }, 5000);
       queueTimer.unref();

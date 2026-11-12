@@ -57,11 +57,18 @@ jobs:
           echo "Scanning repository for leaked private keys or hardcoded tokens..."
           ! grep -rn "BEGIN EC PRIVATE KEY" src/
           ! grep -rn "BEGIN RSA PRIVATE KEY" src/
+          ! grep -rn "BEGIN PRIVATE KEY" src/
+          ! grep -rn "BEGIN OPENSSH PRIVATE KEY" src/
 
       - name: Run Database Migrations
         env:
           DATABASE_URL: postgres://zatca_admin:secret_zatca_password@127.0.0.1:5432/zatca_ledger
         run: npm run migrate
+
+      - name: Live PostgreSQL Lifecycle & Concurrency Invariant Gate
+        env:
+          DATABASE_URL: postgres://zatca_admin:secret_zatca_password@127.0.0.1:5432/zatca_ledger
+        run: npx tsx --test tests/real-postgres-lifecycle-and-concurrency.test.ts
 
       - name: Unit & Integration Test Suite (Full Invariant & Sync Tests)
         env:

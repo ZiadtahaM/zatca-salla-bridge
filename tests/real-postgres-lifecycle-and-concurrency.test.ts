@@ -22,9 +22,28 @@ const realPgPool = new Pool({
 });
 
 let isDbReachable = false;
-let testEgsId = '';
 let testMerchantId = '';
 let certCleanDir = '';
+let encKey = '';
+let certPem = '';
+let encSec = '';
+
+async function createIsolatedEgsUnit(client: any, tag: string): Promise<string> {
+  const egsUuid = randomUUID();
+  const res = await client.query(
+    `INSERT INTO egs_units (
+      merchant_id, branch_id, custom_id, private_key_pem, certificate,
+      csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+      public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+    ) VALUES (
+      $1, 'branch_pg_01', $2, $3, $4,
+      $5, 'simulation', NOW() + INTERVAL '365 days', TRUE, 0, 'INITIAL_HASH_REAL_PG',
+      'pub_bytes', 'sig_bytes', 'cert_hash', $6, 'POS-PG'
+    ) RETURNING id`,
+    [testMerchantId, `EGS-REAL-PG-${tag}-${Date.now()}`, encKey, certPem, encSec, egsUuid]
+  );
+  return res.rows[0].id;
+}
 
 function createSyntheticTestOrder(orderId: number, amount: number = 100): SallaOrderData {
   const taxAmount = Number((amount * 0.15).toFixed(2));
@@ -85,10 +104,10 @@ before(async () => {
   const timestamp = Date.now();
   testMerchantId = `pg_merch_${timestamp}`;
   certCleanDir = join(process.cwd(), `.zatca-real-pg-keys-${timestamp}`);
-  const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certCleanDir);
-
-  const encKey = encryptVaultSecret(privateKeyPem);
-  const encSec = encryptVaultSecret(`sec_pg_${timestamp}`);
+  const generated = generateValidSecp256k1TestCert(certCleanDir);
+  certPem = generated.certPem;
+  encKey = encryptVaultSecret(generated.privateKeyPem);
+  encSec = encryptVaultSecret(`sec_pg_${timestamp}`);
 
   const client = await realPgPool.connect();
   try {
@@ -100,22 +119,6 @@ before(async () => {
       ) ON CONFLICT (merchant_id) DO NOTHING`,
       [testMerchantId, encryptVaultSecret('access_token_pg'), encryptVaultSecret('refresh_token_pg')]
     );
-
-    const egsUuid = randomUUID();
-    const egsRes = await client.query(
-      `INSERT INTO egs_units (
-        merchant_id, branch_id, custom_id, private_key_pem, certificate,
-        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
-        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
-      ) VALUES (
-        $1, 'branch_pg_01', 'EGS-REAL-PG-01', $2, $3,
-        $4, 'simulation', NOW() + INTERVAL '365 days', TRUE, 0, 'INITIAL_HASH_REAL_PG',
-        'pub_bytes', 'sig_bytes', 'cert_hash', $5, 'POS-PG'
-      ) RETURNING id`,
-      [testMerchantId, encKey, certPem, encSec, egsUuid]
-    );
-
-    testEgsId = egsRes.rows[0].id;
   } finally {
     client.release();
   }
@@ -144,12 +147,15 @@ test('Real PostgreSQL Gate 1: Partial unique index uq_invoices_order_original bl
 
   const client = await realPgPool.connect();
   try {
-    const order = createSyntheticTestOrder(600001, 150);
+    const egsId = await createIsolatedEgsUnit(client, 'gate1');
+    const runTimestamp = Date.now();
+    const orderId = 610000 + (runTimestamp % 10000);
+    const order = createSyntheticTestOrder(orderId, 150);
     const inv1 = await processSallaOrderIntoZatcaInvoice(
       client,
-      testEgsId,
+      egsId,
       order,
-      'pg_uniq_idemp_01'
+      `pg_uniq_idemp_${runTimestamp}_01`
     );
     assert.ok(inv1.invoiceId, 'Original invoice inserted successfully');
 
@@ -165,11 +171,11 @@ test('Real PostgreSQL Gate 1: Partial unique index uq_invoices_order_original bl
           icv, pih, invoice_hash, qr_code_payload, signed_xml,
           status, supply_date, issue_timestamp, replaces_invoice_id, subtotal, tax_total, grand_total
         ) VALUES (
-          $1, $2, 'raw_duplicate_attempt', 'simplified_tax_invoice', gen_random_uuid(),
+          $1, $2, $3, 'simplified_tax_invoice', gen_random_uuid(),
           999, 'pih_dummy', 'hash_dummy_01', 'qr_dummy', '<xml/>',
           'signed', CURRENT_DATE, NOW(), NULL, 150.00, 22.50, 172.50
         )`,
-        [testEgsId, String(order.id)]
+        [egsId, String(order.id), `raw_dup_${runTimestamp}`]
       );
       await client.query('COMMIT');
     } catch (dbErr: any) {
@@ -190,12 +196,15 @@ test('Real PostgreSQL Gate 2: Scoped replacement insertion succeeds for the same
 
   const client = await realPgPool.connect();
   try {
-    const order = createSyntheticTestOrder(600002, 200);
+    const egsId = await createIsolatedEgsUnit(client, 'gate2');
+    const runTimestamp = Date.now();
+    const orderId = 620000 + (runTimestamp % 10000);
+    const order = createSyntheticTestOrder(orderId, 200);
     const original = await processSallaOrderIntoZatcaInvoice(
       client,
-      testEgsId,
+      egsId,
       order,
-      'pg_replacement_idemp_orig'
+      `pg_replacement_idemp_${runTimestamp}_orig`
     );
 
     // Mark original as rejected
@@ -204,9 +213,9 @@ test('Real PostgreSQL Gate 2: Scoped replacement insertion succeeds for the same
     // Insert replacement referencing the original
     const replacement = await processSallaOrderIntoZatcaInvoice(
       client,
-      testEgsId,
+      egsId,
       order,
-      'pg_replacement_idemp_orig:replacement',
+      `pg_replacement_idemp_${runTimestamp}_orig:replacement`,
       { replacesInvoiceId: original.invoiceId }
     );
 
@@ -232,12 +241,16 @@ test('Real PostgreSQL Gate 3: Remedy retry idempotency returns identical IDs and
 
   const client = await realPgPool.connect();
   try {
-    const order = createSyntheticTestOrder(600003, 300);
+    const egsId = await createIsolatedEgsUnit(client, 'gate3');
+    const runTimestamp = Date.now();
+    const orderId = 630000 + (runTimestamp % 10000);
+    const order = createSyntheticTestOrder(orderId, 300);
+    const rejectedIdemp = `pg_remedy_idemp_${runTimestamp}_orig`;
     const rejected = await processSallaOrderIntoZatcaInvoice(
       client,
-      testEgsId,
+      egsId,
       order,
-      'pg_remedy_idemp_orig'
+      rejectedIdemp
     );
 
     await client.query(`UPDATE invoices SET status = 'rejected_reporting' WHERE id = $1`, [rejected.invoiceId]);
@@ -263,7 +276,7 @@ test('Real PostgreSQL Gate 3: Remedy retry idempotency returns identical IDs and
 
     const cnCountRes = await client.query(
       `SELECT COUNT(*)::int AS count FROM invoices WHERE invoice_type = 'credit_note' AND idempotency_key = $1`,
-      ['pg_remedy_idemp_orig:cancel_remedy']
+      [`${rejectedIdemp}:cancel_remedy`]
     );
     assert.equal(cnCountRes.rows[0].count, 1, 'PostgreSQL must contain exactly 1 remedy credit note');
   } finally {
@@ -278,6 +291,14 @@ test('Real PostgreSQL Gate 4: 10 concurrent database connections with pg_advisor
   const runTimestamp = Date.now();
   const startOrderIndex = 700000 + (runTimestamp % 100000);
 
+  const setupClient = await realPgPool.connect();
+  let egsId: string;
+  try {
+    egsId = await createIsolatedEgsUnit(setupClient, 'gate4');
+  } finally {
+    setupClient.release();
+  }
+
   // Run 10 parallel tasks on separate pool connections
   const tasks = Array.from({ length: concurrency }, async (_, idx) => {
     const orderId = startOrderIndex + idx;
@@ -286,7 +307,7 @@ test('Real PostgreSQL Gate 4: 10 concurrent database connections with pg_advisor
     try {
       return await processSallaOrderIntoZatcaInvoice(
         client,
-        testEgsId,
+        egsId,
         order,
         `pg_concurrent_${runTimestamp}_${idx}`
       );
@@ -306,13 +327,13 @@ test('Real PostgreSQL Gate 4: 10 concurrent database connections with pg_advisor
        FROM invoices
        WHERE egs_unit_id = $1
        ORDER BY icv ASC`,
-      [testEgsId]
+      [egsId]
     );
 
     const rows = rowsRes.rows;
-    assert.ok(rows.length >= concurrency, `Found ${rows.length} invoices`);
+    assert.equal(rows.length, concurrency, `Must find exactly ${concurrency} invoices for isolated EGS unit`);
 
-    // Verify monotonic ICVs with 0 duplicates
+    // Verify monotonic ICVs starting at 1 with 0 gaps or duplicates
     for (let i = 0; i < rows.length; i++) {
       assert.equal(Number(rows[i].icv), i + 1, `ICV at position ${i} must equal ${i + 1}`);
     }

@@ -2,7 +2,7 @@ process.env.NODE_ENV = 'test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { buildServer } from '../../src/server.js';
 import { pool, initializeDatabaseSchema } from '../../src/storage/db.js';
 import { validateZatcaPreflight } from '../../src/services/zatca-preflight.js';
@@ -70,19 +70,27 @@ async function runLever(): Promise<void> {
     });
 
     await step('1. Gate 1: Salla OAuth2 Handshake & AES-256-GCM Token Vault', async () => {
+      const payload = {
+        event: 'app.store.authorize',
+        merchant: merchantId,
+        data: {
+          access_token: `access_${runId}`,
+          refresh_token: `refresh_${runId}`,
+          expires_in: 1209600,
+          scope: 'offline_access'
+        }
+      };
+      const rawPayload = JSON.stringify(payload);
+      const secret = process.env.SALLA_WEBHOOK_SECRET || 'dev_salla_webhook_secret';
+      const sig = createHmac('sha256', secret).update(rawPayload).digest('hex');
       const res = await app.inject({
         method: 'POST',
         url: '/webhooks/salla/authorize',
-        payload: {
-          event: 'app.store.authorize',
-          merchant: merchantId,
-          data: {
-            access_token: `access_${runId}`,
-            refresh_token: `refresh_${runId}`,
-            expires_in: 1209600,
-            scope: 'offline_access'
-          }
-        }
+        headers: {
+          'content-type': 'application/json',
+          'x-salla-signature': sig
+        },
+        payload: rawPayload
       });
       assert.equal(res.statusCode, 200);
       const dbRow = await pool.query(`SELECT access_token_encrypted FROM merchant_tokens WHERE merchant_id = $1`, [merchantId]);
@@ -125,6 +133,7 @@ async function runLever(): Promise<void> {
             date: { date: '2026-10-20 14:00:00', timezone: 'Asia/Riyadh' },
             status: { id: 1, name: 'Under Review', slug: 'under_review' },
             payment_method: 'credit_card',
+            payment_status: 'paid',
             currency: 'SAR',
             amounts: {
               sub_total: { amount: 200, currency: 'SAR' },
@@ -165,6 +174,7 @@ async function runLever(): Promise<void> {
             date: { date: '2026-10-20 15:00:00', timezone: 'Asia/Riyadh' },
             status: { id: 1, name: 'Under Review', slug: 'under_review' },
             payment_method: 'credit_card',
+            payment_status: 'paid',
             currency: 'SAR',
             amounts: {
               sub_total: { amount: 1000, currency: 'SAR' },

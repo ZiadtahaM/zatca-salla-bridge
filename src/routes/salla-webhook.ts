@@ -25,6 +25,25 @@ import { submitInvoiceToFatoora, FatooraDispatchResult } from '../services/fatoo
 
 export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post('/webhooks/salla/authorize', async (request: FastifyRequest, reply: FastifyReply) => {
+    const rawBodyBuffer = (request as any).rawBody as Buffer | undefined;
+    const signatureHeader = request.headers['x-salla-signature'] as string | undefined;
+
+    let webhookSecret = process.env.SALLA_WEBHOOK_SECRET;
+    if (process.env.NODE_ENV === 'production') {
+      if (!webhookSecret || webhookSecret.includes('dev_salla') || webhookSecret.length < 16) {
+        throw new Error('FATAL: SALLA_WEBHOOK_SECRET must be configured in production environment.');
+      }
+    }
+    if (!webhookSecret) {
+      webhookSecret = 'dev_salla_webhook_secret';
+    }
+
+    if (process.env.NODE_ENV === 'production' || signatureHeader !== undefined) {
+      if (!rawBodyBuffer || !signatureHeader || !verifySallaWebhookSignature(rawBodyBuffer, signatureHeader, webhookSecret)) {
+        return reply.status(401).send({ error: 'Invalid HMAC signature in x-salla-signature header' });
+      }
+    }
+
     const body = (request.body || {}) as any;
     const data = body.data || body;
 
@@ -687,8 +706,7 @@ export async function processSallaWebhookPayload(
     const isDeferredPaymentMethod = ['cod', 'cash_on_delivery', 'bank', 'bank_transfer'].includes(paymentMethod);
     const isExplicitlyPaid = paymentStatus === 'paid' ||
                              (payload.event === 'order.payment.updated' && (payload.data as any)?.status?.toLowerCase() === 'paid');
-    const isExplicitlyUnpaid = ['pending', 'unpaid', 'failed', 'refunded', 'partially_paid'].includes(paymentStatus);
-    const isPaymentReceived = isExplicitlyPaid || (!isDeferredPaymentMethod && !isExplicitlyUnpaid);
+    const isPaymentReceived = isExplicitlyPaid;
 
     let verifiedDeliveredSlugs = ['completed', 'delivered'];
     try {

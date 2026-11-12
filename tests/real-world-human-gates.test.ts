@@ -1,6 +1,7 @@
 process.env.NODE_ENV = 'test';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { join } from 'node:path';
 import { FastifyInstance } from 'fastify';
 import { buildServer } from '../src/server.js';
@@ -50,10 +51,30 @@ test('Gate 1: Salla OAuth2 Handshake POST /webhooks/salla/authorize & AES-256-GC
     }
   };
 
+  const payloadString = JSON.stringify(oauthPayload);
+  const secret = process.env.SALLA_WEBHOOK_SECRET || 'dev_salla_webhook_secret';
+  const validSignature = createHmac('sha256', secret).update(payloadString).digest('hex');
+
+  // Verify that an invalid HMAC signature returns status 401
+  const invalidRes = await app.inject({
+    method: 'POST',
+    url: '/webhooks/salla/authorize',
+    headers: {
+      'content-type': 'application/json',
+      'x-salla-signature': '0000000000000000000000000000000000000000000000000000000000000000'
+    },
+    payload: payloadString
+  });
+  assert.equal(invalidRes.statusCode, 401);
+
   const res = await app.inject({
     method: 'POST',
     url: '/webhooks/salla/authorize',
-    payload: oauthPayload
+    headers: {
+      'content-type': 'application/json',
+      'x-salla-signature': validSignature
+    },
+    payload: payloadString
   });
 
   assert.equal(res.statusCode, 200);
@@ -138,6 +159,7 @@ test('Gate 2: Salla Promo Discounts, Shipping Cost, and COD Fees in <cac:Allowan
         slug: 'under_review'
       },
       payment_method: 'credit_card',
+      payment_status: 'paid',
       currency: 'SAR',
       amounts: {
         sub_total: { amount: 200.00, currency: 'SAR' },
@@ -241,6 +263,7 @@ test('Gate 3: B2B Incomplete Buyer National Address Hold Queue & Enrichment POST
         slug: 'under_review'
       },
       payment_method: 'credit_card',
+      payment_status: 'paid',
       currency: 'SAR',
       amounts: {
         sub_total: { amount: 1000.00, currency: 'SAR' },
@@ -428,6 +451,93 @@ test('Gate 4: COD & Bank Transfer Payment Gate defers signing until order comple
 
   const afterDeliveredEgs = await pool.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsUnitId]);
   assert.equal(Number(afterDeliveredEgs.rows[0].current_icv), icvBefore + 1, 'No second ICV increment on subsequent order.updated');
+});
+
+test('Gate 7b: Electronic credit card order with payment_status: authorized holds invoice until explicit payment confirmation', async () => {
+  const beforeEgs = await pool.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsUnitId]);
+  const icvBefore = Number(beforeEgs.rows[0].current_icv);
+
+  const cardOrderId = Number(`700${testRunId.slice(-6)}`);
+  const baseCardOrder = {
+    id: cardOrderId,
+    reference_id: `CARD-${cardOrderId}`,
+    date: {
+      date: '2026-10-20 18:00:00',
+      timezone: 'Asia/Riyadh'
+    },
+    payment_method: 'credit_card',
+    currency: 'SAR',
+    amounts: {
+      sub_total: { amount: 150.00, currency: 'SAR' },
+      tax: {
+        amount: { amount: 22.50, currency: 'SAR' },
+        percent: 15
+      },
+      total: { amount: 172.50, currency: 'SAR' }
+    },
+    customer: {
+      id: 9902,
+      first_name: 'سارة',
+      last_name: 'القحطاني',
+      tax_number: null
+    },
+    items: [
+      {
+        id: 1,
+        name: 'شال حرير طبيعي',
+        quantity: 1,
+        price: { amount: 150.00, currency: 'SAR' },
+        total: { amount: 150.00, currency: 'SAR' }
+      }
+    ]
+  };
+
+  // 1. Send order.created with payment_status: 'authorized'
+  const holdRes = await app.inject({
+    method: 'POST',
+    url: '/webhooks/salla',
+    payload: {
+      event: 'order.created',
+      merchant: merchantId,
+      created_at: '2026-10-20T18:00:00Z',
+      data: {
+        ...baseCardOrder,
+        payment_status: 'authorized',
+        status: { id: 1, name: 'Under Review', slug: 'under_review' }
+      }
+    }
+  });
+
+  assert.equal(holdRes.statusCode, 200);
+  const holdBody = JSON.parse(holdRes.body);
+  assert.equal(holdBody.status, 'unconfirmed_payment_hold');
+
+  const afterHoldEgs = await pool.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsUnitId]);
+  assert.equal(Number(afterHoldEgs.rows[0].current_icv), icvBefore, 'ICV must remain unchanged on unconfirmed_payment_hold');
+
+  // 2. Send order.payment.updated with status: 'paid'
+  const paidRes = await app.inject({
+    method: 'POST',
+    url: '/webhooks/salla',
+    payload: {
+      event: 'order.payment.updated',
+      merchant: merchantId,
+      created_at: '2026-10-20T18:05:00Z',
+      data: {
+        ...baseCardOrder,
+        payment_status: 'paid',
+        status: { id: 2, name: 'Paid', slug: 'paid' }
+      }
+    }
+  });
+
+  assert.equal(paidRes.statusCode, 200);
+  const paidBody = JSON.parse(paidRes.body);
+  assert.equal(paidBody.status, 'signed_and_recorded');
+  assert.equal(Number(paidBody.icv), icvBefore + 1);
+
+  const afterPaidEgs = await pool.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsUnitId]);
+  assert.equal(Number(afterPaidEgs.rows[0].current_icv), icvBefore + 1, 'ICV must increment by 1 after confirmed payment');
 });
 
 test('Gate 5: Printable Bilingual PDF/A-3 Tax Invoice & HTML Endpoints', async () => {

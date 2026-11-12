@@ -1217,3 +1217,131 @@ test('Discourse Edge Case 16: Refined Voucher Exemption Rules Require Structured
   assert.ok(xmlVoucher.includes('<cbc:ID schemeAgencyID="6" schemeID="UN/ECE 5305">O</cbc:ID>'), 'Voucher must be Category O');
   assert.ok(xmlVoucher.includes('VATEX-SA-OOS'), 'Voucher must have VATEX-SA-OOS exemption code');
 });
+
+test('Discourse Edge Case 17: Electronic Checkout Order Payment Gate Holds Unconfirmed Orders and Issues Invoice on Confirmation', async () => {
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
+  try {
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase17');
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const encSec = encryptVaultSecret('sec_test_edge17');
+
+    const merchantId = 'salla_edge17_store';
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at, subscription_status
+      ) VALUES (
+        $1, 'متجر الحالات الخاصة التجريبي', '300075588700003', '1010010000', $2, $3, NOW() + INTERVAL '30 days', 'active'
+      ) ON CONFLICT (merchant_id) DO UPDATE SET
+        store_name = EXCLUDED.store_name,
+        vat_number = EXCLUDED.vat_number,
+        crn = EXCLUDED.crn,
+        subscription_status = 'active'`,
+      [merchantId, encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
+
+    const initialIcv = 10;
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        '${merchantId}', 'main', 'EGS-EDGE17-01', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 10, 'INITIAL_HASH_EDGE17',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge17', 'IOS-POS'
+      ) RETURNING id`,
+      [encKey, certPem, encSec]
+    );
+    const egsId = egsRes.rows[0].id;
+
+    // Helper to generate electronic order payload
+    const makeOrderPayload = (orderId: number, paymentStatus?: string) => ({
+      event: 'order.created',
+      merchant: merchantId,
+      created_at: '2026-10-22T10:00:00Z',
+      data: {
+        id: orderId,
+        reference_id: `REF-${orderId}`,
+        date: { date: '2026-10-22 10:00:00', timezone: 'Asia/Riyadh' },
+        status: { id: 1, name: 'Under Review', slug: 'under_review' },
+        payment_method: 'credit_card',
+        ...(paymentStatus !== undefined ? { payment_status: paymentStatus } : {}),
+        currency: 'SAR',
+        amounts: {
+          sub_total: { amount: 100.00, currency: 'SAR' },
+          tax: { amount: { amount: 15.00, currency: 'SAR' }, percent: 15 },
+          total: { amount: 115.00, currency: 'SAR' }
+        },
+        customer: {
+          id: 501,
+          first_name: 'نايف',
+          last_name: 'العتيبي',
+          tax_number: null
+        },
+        items: [
+          {
+            id: 1,
+            name: 'منتج تجريبي إلكتروني',
+            quantity: 1,
+            price: { amount: 100.00, currency: 'SAR' },
+            total: { amount: 100.00, currency: 'SAR' }
+          }
+        ]
+      }
+    });
+
+    // 1. payment_status: 'processing' fails closed into unconfirmed_payment_hold
+    const resProcessing = await processSallaWebhookPayload(client, makeOrderPayload(88001, 'processing') as any);
+    assert.equal(resProcessing.statusCode, 200);
+    assert.equal(resProcessing.body.status, 'unconfirmed_payment_hold');
+    assert.equal(resProcessing.body.payment_status, 'processing');
+
+    // 2. payment_status: 'authorized' fails closed into unconfirmed_payment_hold
+    const resAuthorized = await processSallaWebhookPayload(client, makeOrderPayload(88002, 'authorized') as any);
+    assert.equal(resAuthorized.statusCode, 200);
+    assert.equal(resAuthorized.body.status, 'unconfirmed_payment_hold');
+    assert.equal(resAuthorized.body.payment_status, 'authorized');
+
+    // 3. payment_status: undefined fails closed into unconfirmed_payment_hold
+    const resUndefined = await processSallaWebhookPayload(client, makeOrderPayload(88003, undefined) as any);
+    assert.equal(resUndefined.statusCode, 200);
+    assert.equal(resUndefined.body.status, 'unconfirmed_payment_hold');
+
+    // Invariant: zero ICV consumed across unconfirmed payment orders
+    const egsCheck = await client.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsId]);
+    assert.equal(Number(egsCheck.rows[0].current_icv), initialIcv, 'ICV must not be consumed by held unconfirmed orders');
+
+    // 4. When explicit payment confirmation ('paid') arrives, valid invoice is generated
+    const confirmedOrder = makeOrderPayload(88004, 'paid');
+    const resConfirmed = await processSallaWebhookPayload(client, confirmedOrder as any);
+    assert.equal(resConfirmed.statusCode, 200);
+    assert.equal(resConfirmed.body.status, 'signed_and_recorded');
+    assert.equal(Number(resConfirmed.body.icv), initialIcv + 1);
+    assert.ok(resConfirmed.body.invoice_uuid, 'Must produce valid invoice UUID');
+
+    // 5. Subsequent payment update for previously held order (88002) issues signed invoice
+    const paymentUpdatePayload = {
+      event: 'order.payment.updated',
+      merchant: merchantId,
+      created_at: '2026-10-22T10:15:00Z',
+      data: {
+        ...(makeOrderPayload(88002, 'paid').data),
+        status: { id: 2, name: 'Paid', slug: 'paid' }
+      }
+    };
+    const resPaymentUpdate = await processSallaWebhookPayload(client, paymentUpdatePayload as any);
+    assert.equal(resPaymentUpdate.statusCode, 200);
+    assert.equal(resPaymentUpdate.body.status, 'signed_and_recorded');
+    assert.equal(Number(resPaymentUpdate.body.icv), initialIcv + 2);
+
+    const finalEgs = await client.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsId]);
+    assert.equal(Number(finalEgs.rows[0].current_icv), initialIcv + 2, 'ICV must reflect exactly the two confirmed invoices');
+  } finally {
+    client.release();
+    await pool.end();
+  }
+});

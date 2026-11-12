@@ -24,7 +24,7 @@ export function buildServer() {
     global: false,
     encoding: false,
     runFirst: true,
-    routes: ['/webhooks/salla']
+    routes: ['/webhooks/salla', '/webhooks/salla/authorize']
   });
 
   app.get('/health', async () => {

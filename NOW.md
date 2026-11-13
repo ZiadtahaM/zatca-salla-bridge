@@ -22,7 +22,7 @@ The following table summarizes the verified technical capabilities and operation
 
 | Area | Verified Metric | Environment |
 | :--- | :--- | :--- |
-| Automated Test Suites | 91 passing tests across 15 test suites | Node.js test runner |
+| Automated Test Suites | 96 passing tests across 15 test suites | Node.js test runner |
 | Master Verification Gates | 16 passing gates | `npm run verify` |
 | Live PostgreSQL Lifecycle Suite | 4 passing invariant gates | Live PostgreSQL 16 on Docker |
 | TypeScript Diagnostics | 0 compiler errors | `npx tsc --noEmit` |

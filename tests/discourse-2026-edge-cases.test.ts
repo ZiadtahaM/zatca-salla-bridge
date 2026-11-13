@@ -2,6 +2,7 @@ process.env.NODE_ENV = 'test';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import {
   buildUblXmlFromSallaOrder,
   validateB2bBuyerAddress,
@@ -1343,5 +1344,192 @@ test('Discourse Edge Case 17: Electronic Checkout Order Payment Gate Holds Uncon
   } finally {
     client.release();
     await pool.end();
+  }
+});
+
+test('Discourse Edge Case 18: Tax-Point Decision Matrix Quadrants Under GCC VAT Article 23', async () => {
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+  const runId = Date.now().toString();
+  const certDir = join(process.cwd(), `.zatca-test-keys-edgecase18-${runId}`);
+
+  try {
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const encSec = encryptVaultSecret(`sec_test_edge18_${runId}`);
+
+    const merchantId = `salla_edge18_${runId}`;
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at, subscription_status
+      ) VALUES (
+        $1, 'متجر مصفوفة نقطة الاستحقاق', '300075588700003', '1010010000', $2, $3, NOW() + INTERVAL '30 days', 'active'
+      )`,
+      [merchantId, encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
+
+    const initialIcv = 50;
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        '${merchantId}', 'main', 'EGS-EDGE18-01', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 50, 'INITIAL_HASH_EDGE18',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge18', 'IOS-POS'
+      ) RETURNING id`,
+      [encKey, certPem, encSec]
+    );
+    const egsId = egsRes.rows[0].id;
+
+    const makeOrderPayload = (params: {
+      orderId: number;
+      paymentMethod: string;
+      paymentStatus?: string;
+      statusSlug: string;
+      event?: string;
+    }) => ({
+      event: params.event || 'order.created',
+      merchant: merchantId,
+      created_at: '2026-10-22T11:00:00Z',
+      data: {
+        id: params.orderId,
+        reference_id: `REF-${params.orderId}`,
+        date: { date: '2026-10-22 11:00:00', timezone: 'Asia/Riyadh' },
+        status: { id: 1, name: params.statusSlug, slug: params.statusSlug },
+        payment_method: params.paymentMethod,
+        ...(params.paymentStatus !== undefined ? { payment_status: params.paymentStatus } : {}),
+        currency: 'SAR',
+        amounts: {
+          sub_total: { amount: 100.00, currency: 'SAR' },
+          tax: { amount: { amount: 15.00, currency: 'SAR' }, percent: 15 },
+          total: { amount: 115.00, currency: 'SAR' }
+        },
+        customer: {
+          id: 601,
+          first_name: 'سلطان',
+          last_name: 'الغامدي',
+          tax_number: null
+        },
+        items: [
+          {
+            id: 1,
+            name: 'منتج مصفوفة نقطة الاستحقاق',
+            quantity: 1,
+            price: { amount: 100.00, currency: 'SAR' },
+            total: { amount: 100.00, currency: 'SAR' }
+          }
+        ]
+      }
+    });
+
+    // Quadrant 1: Electronic Paid -> consideration_received tax point -> signed_and_recorded
+    const q1Res = await processSallaWebhookPayload(client, makeOrderPayload({
+      orderId: 99101,
+      paymentMethod: 'credit_card',
+      paymentStatus: 'paid',
+      statusSlug: 'under_review'
+    }) as any);
+    assert.equal(q1Res.statusCode, 200);
+    assert.equal(q1Res.body.status, 'signed_and_recorded');
+    assert.equal(q1Res.body.tax_point_basis, 'consideration_received');
+    assert.equal(Number(q1Res.body.icv), initialIcv + 1);
+
+    const q1Sync = await client.query(
+      `SELECT sync_state, metadata, transition_reason FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
+      [merchantId, '99101']
+    );
+    assert.ok(q1Sync.rows.length > 0);
+    assert.equal(q1Sync.rows[0].metadata?.tax_point_basis, 'consideration_received');
+    assert.ok(q1Sync.rows[0].transition_reason.includes('استلام المقابل المالي'));
+
+    // Quadrant 2: Electronic Unpaid with Completed Status -> unconfirmed_payment_hold (0 ICV)
+    const q2Res = await processSallaWebhookPayload(client, makeOrderPayload({
+      orderId: 99102,
+      paymentMethod: 'credit_card',
+      paymentStatus: 'authorized',
+      statusSlug: 'completed'
+    }) as any);
+    assert.equal(q2Res.statusCode, 200);
+    assert.equal(q2Res.body.status, 'unconfirmed_payment_hold');
+
+    const q2Sync = await client.query(
+      `SELECT sync_state, metadata, transition_reason FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
+      [merchantId, '99102']
+    );
+    assert.equal(q2Sync.rows[0].sync_state, 'unconfirmed_payment_hold');
+    assert.equal(q2Sync.rows[0].metadata?.tax_point_basis, 'consideration_received');
+
+    const icvAfterQ2 = await client.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsId]);
+    assert.equal(Number(icvAfterQ2.rows[0].current_icv), initialIcv + 1, 'Quadrant 2 must consume 0 ICV');
+
+    // Quadrant 3: Electronic Failed -> void_payment_failed (0 ICV)
+    const q3Res = await processSallaWebhookPayload(client, makeOrderPayload({
+      orderId: 99103,
+      paymentMethod: 'credit_card',
+      paymentStatus: 'failed',
+      statusSlug: 'in_progress'
+    }) as any);
+    assert.equal(q3Res.statusCode, 200);
+    assert.equal(q3Res.body.status, 'void_payment_failed');
+
+    const q3Sync = await client.query(
+      `SELECT sync_state, transition_reason FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
+      [merchantId, '99103']
+    );
+    assert.equal(q3Sync.rows[0].sync_state, 'void_payment_failed');
+
+    const icvAfterQ3 = await client.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsId]);
+    assert.equal(Number(icvAfterQ3.rows[0].current_icv), initialIcv + 1, 'Quadrant 3 must consume 0 ICV');
+
+    // Quadrant 4a: Deferred COD Unfulfilled -> deferred_payment_hold (0 ICV)
+    const q4aRes = await processSallaWebhookPayload(client, makeOrderPayload({
+      orderId: 99104,
+      paymentMethod: 'cod',
+      statusSlug: 'in_progress'
+    }) as any);
+    assert.equal(q4aRes.statusCode, 200);
+    assert.equal(q4aRes.body.status, 'deferred_payment_hold');
+
+    const q4aSync = await client.query(
+      `SELECT sync_state, transition_reason FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
+      [merchantId, '99104']
+    );
+    assert.equal(q4aSync.rows[0].sync_state, 'deferred_payment_hold');
+
+    const icvAfterQ4a = await client.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsId]);
+    assert.equal(Number(icvAfterQ4a.rows[0].current_icv), initialIcv + 1, 'Quadrant 4a must consume 0 ICV');
+
+    // Quadrant 4b: Deferred COD Delivered -> date_of_supply_delivered tax point -> signed_and_recorded
+    const q4bRes = await processSallaWebhookPayload(client, makeOrderPayload({
+      orderId: 99105,
+      paymentMethod: 'cod',
+      statusSlug: 'delivered'
+    }) as any);
+    assert.equal(q4bRes.statusCode, 200);
+    assert.equal(q4bRes.body.status, 'signed_and_recorded');
+    assert.equal(q4bRes.body.tax_point_basis, 'date_of_supply_delivered');
+    assert.equal(Number(q4bRes.body.icv), initialIcv + 2);
+
+    const q4bSync = await client.query(
+      `SELECT sync_state, metadata, transition_reason FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
+      [merchantId, '99105']
+    );
+    assert.ok(q4bSync.rows.length > 0);
+    assert.equal(q4bSync.rows[0].metadata?.tax_point_basis, 'date_of_supply_delivered');
+    assert.ok(q4bSync.rows[0].transition_reason.includes('تاريخ التوريد الفعلي'));
+
+    const finalIcv = await client.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsId]);
+    assert.equal(Number(finalIcv.rows[0].current_icv), initialIcv + 2, 'Final ICV must reflect exactly the two valid invoices');
+  } finally {
+    client.release();
+    await pool.end();
+    try {
+      rmSync(certDir, { recursive: true, force: true });
+    } catch {
+      // Ignore cleanup error
+    }
   }
 });

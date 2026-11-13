@@ -117,6 +117,136 @@ test('Gate 1: Salla OAuth2 Handshake POST /webhooks/salla/authorize & AES-256-GC
   assert.equal(getBody.scope, 'offline_access');
 });
 
+test('Gate 1b: Salla Standard OAuth Flow GET /api/salla/oauth/callback Code Exchange & Store Profile Initialization', async () => {
+  const oauthMerchantId = `salla_cb_${testRunId}`;
+  const origFetch = globalThis.fetch;
+
+  try {
+    globalThis.fetch = (async (url: any, init?: any) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/oauth2/token')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            access_token: `salla_oauth_live_${testRunId}`,
+            refresh_token: `salla_oauth_refresh_${testRunId}`,
+            expires_in: 1209600,
+            scope: 'offline_access'
+          })
+        } as any;
+      }
+      if (urlStr.includes('/oauth2/user/info')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              merchant: {
+                id: oauthMerchantId,
+                name: 'متجر سلة التجريبي المطور',
+                tax_number: '300075588700003',
+                commercial_number: '1010010000',
+                city: 'الرياض'
+              }
+            }
+          })
+        } as any;
+      }
+      return origFetch(url, init);
+    }) as any;
+
+    // Test GET /api/salla/oauth/authorize-url
+    const authUrlRes = await app.inject({
+      method: 'GET',
+      url: `/api/salla/oauth/authorize-url?client_id=my_client&state=${oauthMerchantId}`
+    });
+    assert.equal(authUrlRes.statusCode, 200);
+    const authUrlBody = JSON.parse(authUrlRes.body);
+    assert.ok(authUrlBody.authorize_url.includes('client_id=my_client'));
+    assert.ok(authUrlBody.authorize_url.includes(`state=${oauthMerchantId}`));
+
+    // Test GET /api/salla/oauth/callback with Accept: application/json
+    const callbackRes = await app.inject({
+      method: 'GET',
+      url: `/api/salla/oauth/callback?code=mock_auth_code_${testRunId}&state=${oauthMerchantId}`,
+      headers: {
+        accept: 'application/json'
+      }
+    });
+
+    assert.equal(callbackRes.statusCode, 200);
+    const cbBody = JSON.parse(callbackRes.body);
+    assert.equal(cbBody.status, 'authorized');
+    assert.equal(cbBody.merchant_id, oauthMerchantId);
+    assert.equal(cbBody.store_info?.name, 'متجر سلة التجريبي المطور');
+
+    // Verify encrypted tokens in PostgreSQL
+    const tokenDb = await pool.query(
+      `SELECT access_token_encrypted, refresh_token_encrypted, store_name, vat_number
+       FROM merchant_tokens WHERE merchant_id = $1`,
+      [oauthMerchantId]
+    );
+    assert.equal(tokenDb.rows.length, 1);
+    assert.ok(tokenDb.rows[0].access_token_encrypted.startsWith('v1:'));
+    assert.ok(tokenDb.rows[0].refresh_token_encrypted.startsWith('v1:'));
+    assert.equal(tokenDb.rows[0].store_name, 'متجر سلة التجريبي المطور');
+    assert.equal(tokenDb.rows[0].vat_number, '300075588700003');
+
+    // Verify active trial subscription was automatically provisioned
+    const subDb = await pool.query(
+      `SELECT status, plan_name FROM merchant_subscriptions WHERE merchant_id = $1`,
+      [oauthMerchantId]
+    );
+    assert.equal(subDb.rows.length, 1);
+    assert.equal(subDb.rows[0].status, 'active');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('Gate 1c: Fail-Closed HMAC Signature Verification & Main Webhook Authorize Delegation on POST /webhooks/salla', async () => {
+  const secret = process.env.SALLA_WEBHOOK_SECRET || 'dev_salla_webhook_secret';
+  const mainAuthorizePayload = JSON.stringify({
+    event: 'app.store.authorize',
+    merchant: `salla_main_auth_${testRunId}`,
+    created_at: '2026-10-20 12:00:00',
+    data: {
+      access_token: `main_access_${testRunId}`,
+      refresh_token: `main_refresh_${testRunId}`,
+      expires_in: 1209600,
+      scope: 'offline_access'
+    }
+  });
+
+  // 1. Tampered signature header returns HTTP 401
+  const tamperedRes = await app.inject({
+    method: 'POST',
+    url: '/webhooks/salla',
+    headers: {
+      'content-type': 'application/json',
+      'x-salla-signature': '0000000000000000000000000000000000000000000000000000000000000000'
+    },
+    payload: mainAuthorizePayload
+  });
+  assert.equal(tamperedRes.statusCode, 401);
+  assert.ok(JSON.parse(tamperedRes.body).error.includes('Invalid HMAC signature'));
+
+  // 2. Valid signature succeeds (HTTP 200) and delegates to token storage
+  const validSig = createHmac('sha256', secret).update(mainAuthorizePayload).digest('hex');
+  const validRes = await app.inject({
+    method: 'POST',
+    url: '/webhooks/salla',
+    headers: {
+      'content-type': 'application/json',
+      'x-salla-signature': validSig
+    },
+    payload: mainAuthorizePayload
+  });
+  assert.equal(validRes.statusCode, 200);
+  assert.equal(JSON.parse(validRes.body).status, 'authorized');
+});
+
 test('Gate 2: Salla Promo Discounts, Shipping Cost, and COD Fees in <cac:AllowanceCharge> with BR-CO-10 and BR-CO-15 math', async () => {
   // 1. Onboard EGS unit for merchant
   const onboardRes = await app.inject({
@@ -538,6 +668,110 @@ test('Gate 7b: Electronic credit card order with payment_status: authorized hold
 
   const afterPaidEgs = await pool.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsUnitId]);
   assert.equal(Number(afterPaidEgs.rows[0].current_icv), icvBefore + 1, 'ICV must increment by 1 after confirmed payment');
+});
+
+test('Gate 7c: Electronic checkout order with status: completed but payment_status: authorized halts in unconfirmed_payment_hold with 0 ICV consumption', async () => {
+  const beforeEgs = await pool.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsUnitId]);
+  const icvBefore = Number(beforeEgs.rows[0].current_icv);
+
+  const cardOrderId = Number(`703${testRunId.slice(-6)}`);
+  const cardPayload = {
+    event: 'order.updated',
+    merchant: merchantId,
+    created_at: '2026-10-20T18:30:00Z',
+    data: {
+      id: cardOrderId,
+      reference_id: `CARD-COMPLETED-UNPAID-${cardOrderId}`,
+      date: { date: '2026-10-20 18:30:00', timezone: 'Asia/Riyadh' },
+      payment_method: 'credit_card',
+      payment_status: 'authorized',
+      status: { id: 3, name: 'Completed', slug: 'completed' },
+      currency: 'SAR',
+      amounts: {
+        sub_total: { amount: 150.00, currency: 'SAR' },
+        tax: { amount: { amount: 22.50, currency: 'SAR' }, percent: 15 },
+        total: { amount: 172.50, currency: 'SAR' }
+      },
+      customer: { id: 9903, first_name: 'فيصل', last_name: 'الشمري', tax_number: null },
+      items: [
+        { id: 1, name: 'منتج إلكتروني غير مدفوع', quantity: 1, price: { amount: 150.00, currency: 'SAR' }, total: { amount: 150.00, currency: 'SAR' } }
+      ]
+    }
+  };
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/webhooks/salla',
+    payload: cardPayload
+  });
+
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res.body);
+  assert.equal(body.status, 'unconfirmed_payment_hold');
+  assert.equal(body.payment_status, 'authorized');
+
+  // Verify ZERO ICV consumption (no forged invoice)
+  const afterEgs = await pool.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsUnitId]);
+  assert.equal(Number(afterEgs.rows[0].current_icv), icvBefore, 'ICV must remain unchanged when electronic order is unpaid, even with completed status');
+
+  const invCheck = await pool.query(`SELECT id FROM invoices WHERE order_id = $1`, [cardOrderId.toString()]);
+  assert.equal(invCheck.rows.length, 0, 'No invoice must be forged for unpaid electronic order');
+});
+
+test('Gate 7d: Electronic order with payment_status: failed returns void_payment_failed with 0 ICV consumption', async () => {
+  const beforeEgs = await pool.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsUnitId]);
+  const icvBefore = Number(beforeEgs.rows[0].current_icv);
+
+  const failedOrderId = Number(`704${testRunId.slice(-6)}`);
+  const failedPayload = {
+    event: 'order.created',
+    merchant: merchantId,
+    created_at: '2026-10-20T18:40:00Z',
+    data: {
+      id: failedOrderId,
+      reference_id: `CARD-FAILED-${failedOrderId}`,
+      date: { date: '2026-10-20 18:40:00', timezone: 'Asia/Riyadh' },
+      payment_method: 'credit_card',
+      payment_status: 'failed',
+      status: { id: 4, name: 'Payment Failed', slug: 'payment_failed' },
+      currency: 'SAR',
+      amounts: {
+        sub_total: { amount: 200.00, currency: 'SAR' },
+        tax: { amount: { amount: 30.00, currency: 'SAR' }, percent: 15 },
+        total: { amount: 230.00, currency: 'SAR' }
+      },
+      customer: { id: 9904, first_name: 'طارق', last_name: 'الغامدي', tax_number: null },
+      items: [
+        { id: 1, name: 'طلب دفع فاشل', quantity: 1, price: { amount: 200.00, currency: 'SAR' }, total: { amount: 200.00, currency: 'SAR' } }
+      ]
+    }
+  };
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/webhooks/salla',
+    payload: failedPayload
+  });
+
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res.body);
+  assert.equal(body.status, 'void_payment_failed');
+  assert.equal(body.payment_status, 'failed');
+
+  // Verify ZERO ICV consumption
+  const afterEgs = await pool.query(`SELECT current_icv FROM egs_units WHERE id = $1`, [egsUnitId]);
+  assert.equal(Number(afterEgs.rows[0].current_icv), icvBefore, 'ICV must remain unchanged on failed payment');
+
+  const invCheck = await pool.query(`SELECT id FROM invoices WHERE order_id = $1`, [failedOrderId.toString()]);
+  assert.equal(invCheck.rows.length, 0, 'No invoice must be forged for failed payment');
+
+  // Verify sync state in order_sync_records
+  const syncCheck = await pool.query(
+    `SELECT sync_state FROM order_sync_records WHERE merchant_id = $1 AND order_id = $2`,
+    [merchantId, failedOrderId.toString()]
+  );
+  assert.equal(syncCheck.rows.length, 1);
+  assert.equal(syncCheck.rows[0].sync_state, 'void_payment_failed');
 });
 
 test('Gate 5: Printable Bilingual PDF/A-3 Tax Invoice & HTML Endpoints', async () => {

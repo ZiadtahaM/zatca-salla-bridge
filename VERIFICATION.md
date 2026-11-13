@@ -7,7 +7,7 @@ This document records the verification framework for zatca-salla-bridge. Every c
 ### Tier 1: Local Automated Test Suite
 This tier exercises pure business logic, data models, schema validation, and unit-level calculations in Node.js.
 Execution command: `npm test`
-Current coverage: 91 tests passing across 15 test suites.
+Current coverage: 96 tests passing across 15 test suites.
 Properties validated:
 - Halala rounding balance satisfying BR-CO-10 and BR-CO-15.
 - ECDSA secp256k1 cryptographic signature generation over SHA-256 invoice digests.

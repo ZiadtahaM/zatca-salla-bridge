@@ -33,6 +33,10 @@ export function getZatcaBaseUrl(environment: ZatcaEnvironment): string {
 }
 
 export function resolveOpenSslPath(): string {
+  const mingwOpenSsl = 'C:\\Program Files\\Git\\mingw64\\bin\\openssl.exe';
+  if (process.platform === 'win32' && existsSync(mingwOpenSsl)) {
+    return mingwOpenSsl;
+  }
   const gitOpenSsl = 'C:\\Program Files\\Git\\usr\\bin\\openssl.exe';
   if (process.platform === 'win32' && existsSync(gitOpenSsl)) {
     return gitOpenSsl;

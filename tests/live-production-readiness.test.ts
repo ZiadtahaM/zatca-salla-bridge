@@ -422,6 +422,7 @@ test('11. Post-reboot webhook_queue draining processes pending orders into signe
         reference_id: testOrderId,
         status: { id: 1, name: 'مكتمل', slug: 'completed' },
         payment_method: 'credit_card',
+        payment_status: 'paid',
         currency: 'SAR',
         customer: {
           id: 'cust_101',

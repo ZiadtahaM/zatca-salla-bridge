@@ -320,3 +320,93 @@ export async function isMerchantSubscriptionActive(
     expiresAt
   };
 }
+
+export async function exchangeSallaAuthorizationCode(
+  code: string,
+  redirectUri: string,
+  customFetch: typeof fetch = fetch
+): Promise<{
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  scope: string;
+}> {
+  const clientId = process.env.SALLA_CLIENT_ID || 'dummy_salla_client_id';
+  const clientSecret = process.env.SALLA_CLIENT_SECRET || 'dummy_salla_client_secret';
+  const tokenEndpoint = process.env.SALLA_OAUTH_TOKEN_URL || process.env.SALLA_OAUTH_URL || 'https://accounts.salla.sa/oauth2/token';
+
+  const bodyParams = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: redirectUri
+  });
+
+  const response = await customFetch(tokenEndpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/json'
+    },
+    body: bodyParams.toString()
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to exchange Salla authorization code: ${response.status} - ${errorText}`);
+  }
+
+  const json = (await response.json()) as any;
+  const data = json.data || json;
+  const accessToken = data.access_token || json.access_token;
+  const refreshToken = data.refresh_token || json.refresh_token;
+  const expiresIn = Number(data.expires_in || json.expires_in || 1209600);
+  const scope = (data.scope || json.scope || 'offline_access').toString();
+
+  if (!accessToken || !refreshToken) {
+    throw new Error('Malformed response from Salla token exchange: missing access_token or refresh_token');
+  }
+
+  return {
+    accessToken,
+    refreshToken,
+    expiresIn,
+    scope
+  };
+}
+
+export function generateSallaAuthorizeUrl(
+  clientId?: string,
+  redirectUri?: string,
+  state?: string,
+  scope?: string
+): string {
+  const resolvedClientId = clientId || process.env.SALLA_CLIENT_ID || 'dummy_salla_client_id';
+  const resolvedRedirectUri = redirectUri || process.env.SALLA_REDIRECT_URI || 'https://zatca.salla.sa/api/salla/oauth/callback';
+  const resolvedScope = scope || 'offline_access';
+  const base = process.env.SALLA_AUTH_URL || 'https://accounts.salla.sa/oauth2/auth';
+
+  const params = new URLSearchParams({
+    client_id: resolvedClientId,
+    response_type: 'code',
+    scope: resolvedScope,
+    redirect_uri: resolvedRedirectUri
+  });
+
+  if (state) {
+    params.set('state', state);
+  }
+
+  return `${base}?${params.toString()}`;
+}
+
+export async function revokeSallaMerchantTokens(
+  client: PoolClient | Pool,
+  merchantId: string
+): Promise<void> {
+  await client.query(
+    `DELETE FROM merchant_tokens WHERE merchant_id = $1`,
+    [merchantId]
+  );
+}

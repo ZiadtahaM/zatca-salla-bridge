@@ -292,7 +292,14 @@ export async function initializeDatabaseSchema(): Promise<void> {
       ALTER TABLE order_sync_records ADD COLUMN IF NOT EXISTS internal_order_id VARCHAR(128);
       ALTER TABLE order_sync_records ADD COLUMN IF NOT EXISTS salla_refund_id VARCHAR(128);
       ALTER TABLE order_sync_records ADD COLUMN IF NOT EXISTS order_payload JSONB;
+      ALTER TABLE order_sync_records ADD COLUMN IF NOT EXISTS metadata JSONB;
       ALTER TABLE invoices ADD COLUMN IF NOT EXISTS salla_refund_id VARCHAR(128);
+
+      DO $$ BEGIN
+        ALTER TABLE order_sync_records DROP CONSTRAINT IF EXISTS chk_order_sync_state;
+      EXCEPTION
+        WHEN undefined_object THEN null;
+      END $$;
 
       CREATE INDEX IF NOT EXISTS idx_order_sync_merchant ON order_sync_records(merchant_id, sync_state);
       CREATE INDEX IF NOT EXISTS idx_order_sync_order ON order_sync_records(order_id);
@@ -372,24 +379,28 @@ export async function initializeDatabaseSchema(): Promise<void> {
 
       -- Tier 1 Architecture Check Constraints
       DO $$ BEGIN
+          ALTER TABLE order_sync_records DROP CONSTRAINT IF EXISTS chk_order_sync_state;
           ALTER TABLE order_sync_records ADD CONSTRAINT chk_order_sync_state
           CHECK (sync_state IN (
               'not_received', 'received', 'persisted', 'awaiting_processing',
               'processing', 'successfully_processed', 'zatca_submission_pending',
               'successfully_reported', 'successfully_cleared', 'temporarily_failed',
-              'permanently_failed', 'not_eligible', 'requires_human_review'
+              'permanently_failed', 'not_eligible', 'requires_human_review',
+              'pending_b2b_enrichment', 'deferred_payment_hold', 'unconfirmed_payment_hold', 'void_payment_failed'
           ));
       EXCEPTION
           WHEN duplicate_object THEN null;
       END $$;
 
       DO $$ BEGIN
+          ALTER TABLE order_sync_transitions DROP CONSTRAINT IF EXISTS chk_sync_trans_to_state;
           ALTER TABLE order_sync_transitions ADD CONSTRAINT chk_sync_trans_to_state
           CHECK (to_state IN (
               'not_received', 'received', 'persisted', 'awaiting_processing',
               'processing', 'successfully_processed', 'zatca_submission_pending',
               'successfully_reported', 'successfully_cleared', 'temporarily_failed',
-              'permanently_failed', 'not_eligible', 'requires_human_review'
+              'permanently_failed', 'not_eligible', 'requires_human_review',
+              'pending_b2b_enrichment', 'deferred_payment_hold', 'unconfirmed_payment_hold', 'void_payment_failed'
           ));
       EXCEPTION
           WHEN duplicate_object THEN null;

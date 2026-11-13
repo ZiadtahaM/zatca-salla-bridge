@@ -24,7 +24,11 @@ export type SyncState =
   | 'temporarily_failed'
   | 'permanently_failed'
   | 'not_eligible'
-  | 'requires_human_review';
+  | 'requires_human_review'
+  | 'pending_b2b_enrichment'
+  | 'deferred_payment_hold'
+  | 'unconfirmed_payment_hold'
+  | 'void_payment_failed';
 
 export interface OrderSyncRecord {
   id: string;
@@ -53,6 +57,7 @@ export interface OrderSyncRecord {
     country?: string;
   } | null;
   eligibilityDetails?: Record<string, any> | null;
+  metadata?: Record<string, any> | null;
   lastEventAt: Date;
   nextAction?: string | null;
   createdAt: Date;
@@ -356,6 +361,7 @@ export async function transitionOrderSyncState(
            order_currency = COALESCE($13, order_currency),
            customer_summary = COALESCE($14::jsonb, customer_summary),
            eligibility_details = COALESCE($15::jsonb, eligibility_details),
+           metadata = COALESCE($20::jsonb, metadata),
            next_action = $16,
            internal_order_id = COALESCE($18, internal_order_id),
            salla_refund_id = COALESCE($19, salla_refund_id),
@@ -381,7 +387,8 @@ export async function transitionOrderSyncState(
         nextAction,
         syncRecordId,
         input.internalOrderId || null,
-        input.sallaRefundId || null
+        input.sallaRefundId || null,
+        input.metadata ? JSON.stringify(input.metadata) : null
       ]
     );
   } else {
@@ -391,8 +398,8 @@ export async function transitionOrderSyncState(
         invoice_id, invoice_uuid, invoice_type, attempt_count,
         correlation_id, error_code, error_category, reason,
         is_recoverable, order_amount, order_currency, customer_summary,
-        eligibility_details, next_action, last_event_at, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18::jsonb, $19, NOW(), NOW(), NOW())
+        eligibility_details, metadata, next_action, last_event_at, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18::jsonb, $20::jsonb, $19, NOW(), NOW(), NOW())
       RETURNING id`,
       [
         input.merchantId,
@@ -413,7 +420,8 @@ export async function transitionOrderSyncState(
         input.orderCurrency || 'SAR',
         input.customerSummary ? JSON.stringify(input.customerSummary) : null,
         input.eligibilityDetails ? JSON.stringify(input.eligibilityDetails) : null,
-        nextAction
+        nextAction,
+        input.metadata ? JSON.stringify(input.metadata) : null
       ]
     );
     syncRecordId = insertRes.rows[0].id;
@@ -517,6 +525,7 @@ export async function getOrderSyncWithHistory(
     orderCurrency: row.order_currency || 'SAR',
     customerSummary: typeof row.customer_summary === 'string' ? JSON.parse(row.customer_summary) : row.customer_summary,
     eligibilityDetails: typeof row.eligibility_details === 'string' ? JSON.parse(row.eligibility_details) : row.eligibility_details,
+    metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || null),
     lastEventAt: new Date(row.last_event_at),
     nextAction: row.next_action,
     createdAt: new Date(row.created_at),
@@ -633,6 +642,7 @@ export async function queryOrderSyncRecords(
       orderCurrency: row.order_currency || 'SAR',
       customerSummary: typeof row.customer_summary === 'string' ? JSON.parse(row.customer_summary) : row.customer_summary,
       eligibilityDetails: typeof row.eligibility_details === 'string' ? JSON.parse(row.eligibility_details) : row.eligibility_details,
+    metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || null),
       lastEventAt: new Date(row.last_event_at),
       nextAction: row.next_action,
       createdAt: new Date(row.created_at),

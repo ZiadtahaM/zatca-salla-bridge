@@ -4,6 +4,10 @@ import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 export function resolveOpenSslBinary(): string {
+  const mingwOpenSsl = 'C:\\Program Files\\Git\\mingw64\\bin\\openssl.exe';
+  if (process.platform === 'win32' && existsSync(mingwOpenSsl)) {
+    return mingwOpenSsl;
+  }
   const gitOpenSsl = 'C:\\Program Files\\Git\\usr\\bin\\openssl.exe';
   if (process.platform === 'win32' && existsSync(gitOpenSsl)) {
     return gitOpenSsl;
@@ -1277,8 +1281,32 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       let customer_summary: any = null;
       let eligibility_details: any = null;
       let next_action: any = null;
+      let metadata: any = null;
 
-      if (params.length >= 19) {
+      if (params.length >= 20) {
+        [
+          merchant_id,
+          order_id,
+          internal_order_id,
+          salla_refund_id,
+          sync_state,
+          source_event,
+          invoice_id,
+          invoice_uuid,
+          invoice_type,
+          correlation_id,
+          error_code,
+          error_category,
+          reason,
+          is_recoverable,
+          order_amount,
+          order_currency,
+          customer_summary,
+          eligibility_details,
+          next_action,
+          metadata
+        ] = params;
+      } else if (params.length >= 19) {
         [
           merchant_id,
           order_id,
@@ -1338,12 +1366,14 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         error_code: error_code || null,
         error_category: error_category || null,
         reason: reason || null,
+        transition_reason: reason || null,
         is_recoverable: Boolean(is_recoverable),
         order_amount: order_amount !== undefined ? order_amount : null,
         order_currency: order_currency || 'SAR',
         customer_summary: customer_summary ? (typeof customer_summary === 'string' ? JSON.parse(customer_summary) : customer_summary) : null,
         eligibility_details: eligibility_details ? (typeof eligibility_details === 'string' ? JSON.parse(eligibility_details) : eligibility_details) : null,
         next_action: next_action || null,
+        metadata: metadata ? (typeof metadata === 'string' ? JSON.parse(metadata) : metadata) : null,
         last_event_at: new Date(),
         created_at: new Date(),
         updated_at: new Date()
@@ -1366,6 +1396,7 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         existing.error_code = params[7];
         existing.error_category = params[8];
         existing.reason = params[9];
+        existing.transition_reason = params[9];
         existing.is_recoverable = Boolean(params[10]);
         if (params[11] !== null && params[11] !== undefined) existing.order_amount = params[11];
         if (params[12]) existing.order_currency = params[12];
@@ -1374,6 +1405,7 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         existing.next_action = params[15];
         if (params[17]) (existing as any).internal_order_id = params[17];
         if (params[18]) (existing as any).salla_refund_id = params[18];
+        if (params[19] !== undefined) (existing as any).metadata = params[19] ? (typeof params[19] === 'string' ? JSON.parse(params[19]) : params[19]) : null;
         existing.last_event_at = new Date();
         existing.updated_at = new Date();
       }

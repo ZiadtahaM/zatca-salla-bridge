@@ -17,13 +17,124 @@ import {
   fetchSallaStoreInfo,
   updateMerchantStoreProfile,
   updateMerchantSubscription,
-  isMerchantSubscriptionActive
+  isMerchantSubscriptionActive,
+  exchangeSallaAuthorizationCode,
+  generateSallaAuthorizeUrl,
+  revokeSallaMerchantTokens,
+  SallaStoreInfo
 } from '../services/salla-oauth.js';
+import { createHash } from 'node:crypto';
 import { dispatchMerchantAlert } from '../services/alert-dispatcher.js';
 import { transitionOrderSyncState, SyncState } from '../services/sync-service.js';
 import { submitInvoiceToFatoora, FatooraDispatchResult } from '../services/fatoora-dispatcher.js';
 
 export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void> {
+  fastify.get('/api/salla/oauth/authorize-url', async (request: FastifyRequest, reply: FastifyReply) => {
+    const query = (request.query || {}) as Record<string, any>;
+    const clientId = query.client_id ? String(query.client_id) : undefined;
+    const redirectUri = query.redirect_uri ? String(query.redirect_uri) : undefined;
+    const state = query.state ? String(query.state) : undefined;
+    const scope = query.scope ? String(query.scope) : undefined;
+    const authorizeUrl = generateSallaAuthorizeUrl(clientId, redirectUri, state, scope);
+
+    if (query.redirect === 'true' || query.redirect === true) {
+      return reply.redirect(authorizeUrl);
+    }
+    return reply.status(200).send({ authorize_url: authorizeUrl });
+  });
+
+  const handleOAuthCallback = async (request: FastifyRequest, reply: FastifyReply) => {
+    const query = (request.query || {}) as Record<string, any>;
+    const code = query.code ? String(query.code).trim() : '';
+    const state = query.state ? String(query.state).trim() : '';
+
+    if (!code) {
+      return reply.status(400).send({ error: 'Missing authorization code in query parameters' });
+    }
+
+    const defaultRedirectUri = `${request.protocol}://${request.hostname}/api/salla/oauth/callback`;
+    const redirectUri = query.redirect_uri ? String(query.redirect_uri) : (process.env.SALLA_REDIRECT_URI || defaultRedirectUri);
+
+    const customFetch = (fastify as any).customFetch || (globalThis as any).sallaCustomFetch || fetch;
+
+    let tokens: { accessToken: string; refreshToken: string; expiresIn: number; scope: string };
+    try {
+      tokens = await exchangeSallaAuthorizationCode(code, redirectUri, customFetch);
+    } catch (err: any) {
+      return reply.status(400).send({ error: `OAuth code exchange failed: ${err.message}` });
+    }
+
+    let storeInfo: SallaStoreInfo | null = null;
+    let merchantId = query.merchant ? String(query.merchant) : (query.merchant_id ? String(query.merchant_id) : '');
+
+    try {
+      storeInfo = await fetchSallaStoreInfo(tokens.accessToken, undefined, customFetch);
+      if (storeInfo?.id && !merchantId) {
+        merchantId = storeInfo.id;
+      }
+    } catch {
+      // Non-blocking in offline or test environments
+    }
+
+    if (!merchantId && state) {
+      try {
+        const parsedState = JSON.parse(state);
+        merchantId = (parsedState.merchantId || parsedState.merchant || '').toString();
+      } catch {
+        if (/^[a-zA-Z0-9_-]+$/.test(state) && !state.startsWith('csrf_')) {
+          merchantId = state;
+        }
+      }
+    }
+
+    if (!merchantId) {
+      merchantId = `merchant_${createHash('sha256').update(code).digest('hex').slice(0, 12)}`;
+    }
+
+    const client = await pool.connect();
+    try {
+      await storeSallaMerchantTokens(client, {
+        merchantId,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        expiresIn: tokens.expiresIn,
+        scope: tokens.scope,
+        storeName: storeInfo?.name,
+        vatNumber: storeInfo?.vatNumber,
+        crn: storeInfo?.crn,
+        city: storeInfo?.city
+      });
+
+      if (storeInfo && (storeInfo.name || storeInfo.vatNumber || storeInfo.crn || storeInfo.city)) {
+        await updateMerchantStoreProfile(client, merchantId, {
+          storeName: storeInfo.name,
+          vatNumber: storeInfo.vatNumber,
+          crn: storeInfo.crn,
+          city: storeInfo.city
+        });
+      }
+
+      await updateMerchantSubscription(client, merchantId, 'standard', 'active');
+
+      const acceptHeader = request.headers.accept || '';
+      if (acceptHeader.includes('application/json')) {
+        return reply.status(200).send({
+          status: 'authorized',
+          merchant_id: merchantId,
+          store_info: storeInfo || undefined
+        });
+      }
+
+      return reply.redirect(`/portal?merchantId=${encodeURIComponent(merchantId)}`);
+    } finally {
+      client.release();
+    }
+  };
+
+  fastify.get('/api/salla/oauth/callback', handleOAuthCallback);
+  fastify.get('/oauth/callback', handleOAuthCallback);
+  fastify.get('/webhooks/salla/authorize', handleOAuthCallback);
+
   fastify.post('/webhooks/salla/authorize', async (request: FastifyRequest, reply: FastifyReply) => {
     const rawBodyBuffer = (request as any).rawBody as Buffer | undefined;
     const signatureHeader = request.headers['x-salla-signature'] as string | undefined;
@@ -136,9 +247,10 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
       webhookSecret = 'dev_salla_webhook_secret';
     }
 
-    const isValid = verifySallaWebhookSignature(rawBodyBuffer, signatureHeader, webhookSecret);
-    if (!isValid && process.env.NODE_ENV === 'production') {
-      return reply.status(401).send({ error: 'Invalid HMAC signature in x-salla-signature header' });
+    if (process.env.NODE_ENV === 'production' || signatureHeader !== undefined) {
+      if (!signatureHeader || !verifySallaWebhookSignature(rawBodyBuffer, signatureHeader, webhookSecret)) {
+        return reply.status(401).send({ error: 'Invalid HMAC signature in x-salla-signature header' });
+      }
     }
 
     const parseResult = SallaWebhookPayloadSchema.safeParse(request.body);
@@ -161,7 +273,7 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
 
     const client = await pool.connect();
     try {
-      if (orderId && orderId !== '0') {
+      if (payload.event !== 'app.store.authorize' && orderId && orderId !== '0') {
         const customerSummary = {
           isB2B: isB2bCustomer(orderData?.customer?.tax_number),
           buyerVat: orderData?.customer?.tax_number || undefined,
@@ -207,7 +319,7 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
         const result = await processSallaWebhookPayload(client, payload);
         return reply.status(result.statusCode).send(result.body);
       } catch (procErr: any) {
-        if (orderId && orderId !== '0') {
+        if (payload.event !== 'app.store.authorize' && orderId && orderId !== '0') {
           await transitionOrderSyncState(client, {
             merchantId,
             orderId,
@@ -349,6 +461,55 @@ export async function processSallaWebhookPayload(
 ): Promise<WebhookProcessOutput> {
   const merchantId = payload.merchant.toString();
 
+  // Support receiving app.store.authorize on main webhook route
+  if (payload.event === 'app.store.authorize') {
+    const authData = (payload.data || {}) as any;
+    const body = payload as any;
+    const accessToken = (authData.access_token || body.access_token || '').toString().trim();
+    const refreshToken = (authData.refresh_token || body.refresh_token || '').toString().trim();
+    const expiresIn = Number(authData.expires || authData.expires_in || body.expires || body.expires_in || 1209600);
+    const scope = (authData.scope || body.scope || 'offline_access').toString();
+
+    if (!merchantId || !accessToken || !refreshToken) {
+      return {
+        statusCode: 400,
+        body: { error: 'Missing required Salla OAuth fields (merchant, access_token, refresh_token)' }
+      };
+    }
+
+    await storeSallaMerchantTokens(client, {
+      merchantId,
+      accessToken,
+      refreshToken,
+      expiresIn,
+      scope
+    });
+
+    try {
+      const storeInfo = await fetchSallaStoreInfo(accessToken);
+      if (storeInfo?.name || storeInfo?.vatNumber || storeInfo?.crn || storeInfo?.city) {
+        await updateMerchantStoreProfile(client, merchantId, {
+          storeName: storeInfo.name,
+          vatNumber: storeInfo.vatNumber,
+          crn: storeInfo.crn,
+          city: storeInfo.city
+        });
+      }
+    } catch {
+      // Non-blocking in offline or test environments
+    }
+
+    await updateMerchantSubscription(client, merchantId, 'standard', 'active');
+
+    return {
+      statusCode: 200,
+      body: {
+        status: 'authorized',
+        merchant_id: merchantId
+      }
+    };
+  }
+
   // Handle Salla App Store Billing Lifecycle Events
   if (payload.event.startsWith('app.subscription.') || payload.event === 'app.uninstalled') {
     const subData = (payload.data || {}) as any;
@@ -357,6 +518,7 @@ export async function processSallaWebhookPayload(
 
     if (payload.event === 'app.uninstalled') {
       status = 'uninstalled';
+      await revokeSallaMerchantTokens(client, merchantId);
     } else if (payload.event === 'app.subscription.expired') {
       status = 'expired';
     } else if (payload.event === 'app.subscription.canceled') {
@@ -426,6 +588,7 @@ export async function processSallaWebhookPayload(
                         payload.event === 'order.updated' ||
                         payload.event === 'order.status.updated' ||
                         payload.event === 'order.payment.updated';
+  let taxPointBasis: 'consideration_received' | 'date_of_supply_delivered' = 'consideration_received';
 
   // 1. Dedicated Shipping Address Change Handling:
   // Address updates represent logistical modifications and must NEVER trigger tax invoice generation.
@@ -741,43 +904,119 @@ export async function processSallaWebhookPayload(
 
     const isFinalizedStatus = verifiedDeliveredSlugs.includes(statusSlug);
 
-    // Universal payment / supply verification gate:
-    // Under Article 23(1) and Article 23(2)(b) of the GCC Unified VAT Agreement:
-    // VAT becomes due on the earliest applicable date of supply, invoice issuance, or receipt of consideration.
-    // Unpaid deferred orders (COD / Bank Transfer) or electronic orders awaiting payment authorization
-    // hold invoice issuance until consideration is confirmed received or physical delivery is verified.
-    if (!isPaymentReceived && !isFinalizedStatus) {
-      const isHoldDeferred = isDeferredPaymentMethod;
-      await transitionOrderSyncState(client, {
-        merchantId,
-        orderId,
-        internalOrderId,
-        toState: 'awaiting_processing',
-        sourceEvent: payload.event,
-        orderAmount: orderData.amounts?.total?.amount || null,
-        orderCurrency: orderData.currency || 'SAR',
-        reason: isHoldDeferred
-          ? `طلب دفع عند الاستلام أو حوالة بنكية مؤجل حتى تحقق التوصيل الفعلي أو وصول الحالة إلى: ${verifiedDeliveredSlugs.join(' أو ')}`
-          : `طلب بانتظار تأكيد استلام المقابل المالي (حالة الدفع: ${paymentStatus || 'pending'})`,
-        isRecoverable: false,
-        nextAction: isHoldDeferred
-          ? 'بانتظار تأكيد التوصيل الفعلي عبر شركة الشحن أو تحديث الحالة إلى تسليم / Awaiting delivery completion'
-          : 'بانتظار تأكيد عملية الدفع من سلة (order.payment.updated)'
-      }).catch(() => {});
+    // Strict Payment & Tax-Point Decision Logic under GCC Unified VAT Agreement Article 23:
+    // 1. Electronic payment methods (!isDeferredPaymentMethod e.g. credit card, Apple Pay, Mada):
+    //    - If paymentStatus === 'failed' or 'cancelled': do NOT issue an invoice.
+    //      Transition order sync state to void_payment_failed with zero ICV consumption and return 200.
+    //    - Consideration MUST be explicitly confirmed paid (isExplicitlyPaid === true).
+    //      Even if status.slug === 'completed' or 'delivered', an electronic checkout order that is NOT paid
+    //      (authorized, processing, unpaid, etc.) must NEVER issue an invoice.
+    //      It must halt inside unconfirmed_payment_hold with zero ICV consumption.
+    // 2. Deferred payment methods (isDeferredPaymentMethod === true e.g. cod, cash_on_delivery, bank, bank_transfer):
+    //    - Invoice issuance is deferred until verified physical delivery (isFinalizedStatus === true).
+    //      Ordinary processing statuses (under_review, in_progress, packaging, ready, etc.) halt in deferred_payment_hold.
+    if (!isDeferredPaymentMethod) {
+      if (paymentStatus === 'failed' || paymentStatus === 'cancelled') {
+        await transitionOrderSyncState(client, {
+          merchantId,
+          orderId,
+          internalOrderId,
+          toState: 'void_payment_failed' as SyncState,
+          sourceEvent: payload.event,
+          orderAmount: orderData.amounts?.total?.amount || null,
+          orderCurrency: orderData.currency || 'SAR',
+          reason: `عملية دفع إلكترونية فاشلة أو ملغاة (${paymentStatus}) - لا يتم إصدار فاتورة ضريبية نظاماً بموجب المادة 23 من الاتفاقية الموحدة لضريبة القيمة المضافة`,
+          metadata: {
+            payment_method: orderData.payment_method,
+            payment_status: paymentStatus,
+            tax_point_basis: 'none_payment_failed'
+          },
+          isRecoverable: false,
+          nextAction: 'لا يتطلب أي إجراء / Voided payment'
+        }).catch(() => {});
 
-      return {
-        statusCode: 200,
-        body: {
-          status: isHoldDeferred ? 'deferred_payment_hold' : 'unconfirmed_payment_hold',
-          order_id: orderId,
-          payment_method: orderData.payment_method,
-          payment_status: paymentStatus || 'pending',
-          order_status: orderData.status?.slug,
-          reason: isHoldDeferred
-            ? `COD and Bank Transfer orders are deferred until status reaches verified delivery: ${verifiedDeliveredSlugs.join(', ')}`
-            : `Order payment is pending (${paymentStatus || 'unpaid'}); invoice deferred until consideration is confirmed or delivery is complete`
-        }
-      };
+        return {
+          statusCode: 200,
+          body: {
+            status: 'void_payment_failed',
+            order_id: orderId,
+            payment_method: orderData.payment_method,
+            payment_status: paymentStatus,
+            order_status: orderData.status?.slug,
+            reason: `Electronic payment is ${paymentStatus}; invoice voided with zero ICV consumption under Article 23.`
+          }
+        };
+      }
+
+      if (!isExplicitlyPaid) {
+        await transitionOrderSyncState(client, {
+          merchantId,
+          orderId,
+          internalOrderId,
+          toState: 'unconfirmed_payment_hold',
+          sourceEvent: payload.event,
+          orderAmount: orderData.amounts?.total?.amount || null,
+          orderCurrency: orderData.currency || 'SAR',
+          reason: `طلب إلكتروني بانتظار تأكيد استلام المقابل المالي (حالة الدفع: ${paymentStatus || 'unpaid'}) - يتم تعليق الفاتورة نظاماً حتى تأكيد الدفع بموجب المادة 23 من الاتفاقية الموحدة لضريبة القيمة المضافة [أساس نقطة الضريبة: استلام المقابل المالي]`,
+          metadata: {
+            payment_method: orderData.payment_method,
+            payment_status: paymentStatus || 'unpaid',
+            order_status: statusSlug,
+            tax_point_basis: 'consideration_received'
+          },
+          isRecoverable: false,
+          nextAction: 'بانتظار تأكيد عملية الدفع من سلة (order.payment.updated)'
+        }).catch(() => {});
+
+        return {
+          statusCode: 200,
+          body: {
+            status: 'unconfirmed_payment_hold',
+            order_id: orderId,
+            payment_method: orderData.payment_method,
+            payment_status: paymentStatus || 'unpaid',
+            order_status: orderData.status?.slug,
+            reason: `Electronic order payment is unconfirmed (${paymentStatus || 'unpaid'}); invoice withheld under Article 23.`
+          }
+        };
+      }
+
+      taxPointBasis = 'consideration_received';
+    } else {
+      if (!isFinalizedStatus) {
+        await transitionOrderSyncState(client, {
+          merchantId,
+          orderId,
+          internalOrderId,
+          toState: 'deferred_payment_hold',
+          sourceEvent: payload.event,
+          orderAmount: orderData.amounts?.total?.amount || null,
+          orderCurrency: orderData.currency || 'SAR',
+          reason: `طلب دفع مؤجل (عند الاستلام أو حوالة بنكية) مؤجل حتى تحقق التوصيل الفعلي: ${verifiedDeliveredSlugs.join(' أو ')} بموجب المادة 23 من الاتفاقية الموحدة لضريبة القيمة المضافة [أساس نقطة الضريبة: تاريخ التوريد الفعلي]`,
+          metadata: {
+            payment_method: orderData.payment_method,
+            payment_status: paymentStatus || 'pending',
+            order_status: statusSlug,
+            tax_point_basis: 'date_of_supply_delivered'
+          },
+          isRecoverable: false,
+          nextAction: 'بانتظار تأكيد التوصيل الفعلي عبر شركة الشحن أو تحديث الحالة إلى تسليم / Awaiting delivery completion'
+        }).catch(() => {});
+
+        return {
+          statusCode: 200,
+          body: {
+            status: 'deferred_payment_hold',
+            order_id: orderId,
+            payment_method: orderData.payment_method,
+            payment_status: paymentStatus || 'pending',
+            order_status: orderData.status?.slug,
+            reason: `COD and Bank Transfer orders are deferred until status reaches verified delivery: ${verifiedDeliveredSlugs.join(', ')}`
+          }
+        };
+      }
+
+      taxPointBasis = 'date_of_supply_delivered';
     }
 
     if (isB2bCustomer(orderData.customer?.tax_number)) {
@@ -1019,9 +1258,12 @@ export async function processSallaWebhookPayload(
       city: orderData.shipping?.address?.city,
       country: orderData.shipping?.address?.country || 'SA'
     },
+    metadata: {
+      ...(isRefundOrCancel ? {} : { tax_point_basis: taxPointBasis })
+    },
     reason: isRefundOrCancel
       ? `تم إصدار إشعار دائن مشفر كود 381 بنجاح وإرساله لهيئة الزكاة (${finalZatcaStatus}) برقم تسلسلي (${result.icv})`
-      : `تم إصدار وتوقيع الفاتورة مشفرة وإرسالها لهيئة الزكاة (${finalZatcaStatus}) برقم تسلسلي (${result.icv})`,
+      : `تم إصدار وتوقيع الفاتورة مشفرة وإرسالها لهيئة الزكاة (${finalZatcaStatus}) برقم تسلسلي (${result.icv}) [أساس نقطة الضريبة: ${taxPointBasis === 'consideration_received' ? 'استلام المقابل المالي' : 'تاريخ التوريد الفعلي'}]`,
     isRecoverable: finalZatcaStatus === 'queued_dlq_retry',
     nextAction: finalZatcaStatus === 'queued_dlq_retry'
       ? 'بانتظار إعادة المحاولة التلقائية عبر طابور المعالجة (DLQ)'
@@ -1041,6 +1283,7 @@ export async function processSallaWebhookPayload(
       is_b2c: result.isB2C,
       document_type: isRefundOrCancel ? 'credit_note' : (result.isB2C ? 'simplified_tax_invoice' : 'tax_invoice'),
       zatca_status: finalZatcaStatus,
+      tax_point_basis: isRefundOrCancel ? undefined : taxPointBasis,
       dispatch_result: dispatchResult
     }
   };
@@ -1088,7 +1331,7 @@ export async function drainWebhookQueue(poolInstance = pool): Promise<{ processe
           const rawPayload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
           const orderData = rawPayload?.data as any;
           const orderId = orderData?.id?.toString();
-          if (orderId && orderId !== '0') {
+          if (row.event_name !== 'app.store.authorize' && orderId && orderId !== '0') {
             await transitionOrderSyncState(client, {
               merchantId: row.merchant_id,
               orderId,

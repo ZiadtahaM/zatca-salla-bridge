@@ -177,7 +177,13 @@ export const SallaWebhookPayloadSchema = z.discriminatedUnion('event', [
     merchant: z.number().or(z.string()),
     created_at: z.string(),
     data: SallaSubscriptionDataSchema
-  })
+  }),
+  z.object({
+    event: z.literal('app.store.authorize'),
+    merchant: z.number().or(z.string()),
+    created_at: z.string().optional(),
+    data: z.record(z.any()).optional()
+  }).passthrough()
 ]);
 
 export type SallaWebhookPayload = z.infer<typeof SallaWebhookPayloadSchema>;

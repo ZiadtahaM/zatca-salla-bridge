@@ -35,7 +35,7 @@ The following table summarizes the verified technical capabilities and operation
 | Concurrency Protection | Session advisory lock `pg_advisory_xact_lock` | PostgreSQL 16 engine |
 | Audit Immutability | Trigger `trg_audit_logs_immutable` raises on updates/deletions | PostgreSQL 16 trigger |
 | Concurrency Benchmark | 1,000 invoices with 0 duplicate ICVs and intact PIH chains | Concurrency runner |
-| GitHub Actions CI | Commit 11c8485 (run 43276280316) passed all gates and suites | Remote Ubuntu runner |
+| GitHub Actions CI | Commit 11523e1 (run 43450441556) passed all gates and suites | Remote Ubuntu runner |
 | Webhook Authorization Security | Mandatory HMAC-SHA256 signature verification on authorization | Fastify route guard |
 | Electronic Payment Safety Gate | Unconfirmed card payments hold without ICV consumption | Salla webhook engine |
 | Network Isolation | Port 5432 bound to loopback `127.0.0.1` | Docker compose config |

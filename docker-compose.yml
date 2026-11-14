@@ -21,17 +21,15 @@ services:
     build: .
     container_name: zatca-bridge
     restart: unless-stopped
-    # CRITICAL INVARIANT: withEgsMutex serializes transactions in Node.js process memory per EGS unit.
-    # Keep replicas locked to 1. Do not run multi-container clusters without distributed Redis locks.
-    deploy:
-      replicas: 1
     environment:
-      DATABASE_URL: postgres://zatca_admin:secret_zatca_password@postgres:5432/zatca_ledger
+      DATABASE_URL: ${DATABASE_URL:-postgres://zatca_admin:secret_zatca_password@postgres:5432/zatca_ledger}
       PORT: 3000
       HOST: 0.0.0.0
-      LOG_LEVEL: info
-      SALLA_WEBHOOK_SECRET: change_in_production
-      ZATCA_ENV: sandbox
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SALLA_WEBHOOK_SECRET: ${SALLA_WEBHOOK_SECRET:-dev_salla_webhook_secret_fallback}
+      SESSION_SECRET: ${SESSION_SECRET:-dev_zatca_session_secret_32_characters_minimum}
+      VAULT_KEY_HEX: ${VAULT_KEY_HEX:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
+      ZATCA_ENV: ${ZATCA_ENV:-sandbox}
     ports:
       - "3000:3000"
     depends_on:

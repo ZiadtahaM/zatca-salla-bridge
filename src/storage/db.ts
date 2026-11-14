@@ -1,10 +1,14 @@
 import { Pool } from 'pg';
 
+const useSsl = process.env.DATABASE_SSL === 'true' || 
+  (typeof process.env.DATABASE_URL === 'string' && process.env.DATABASE_URL.includes('sslmode=require'));
+
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgres://zatca_admin:secret_zatca_password@127.0.0.1:5432/zatca_ledger',
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000
+  connectionTimeoutMillis: 5000,
+  ...(useSsl ? { ssl: { rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED === 'true' } } : {})
 });
 
 export async function initializeDatabaseSchema(): Promise<void> {

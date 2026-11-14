@@ -19,6 +19,7 @@ export function buildServer() {
     logger: {
       level: process.env.LOG_LEVEL || 'info'
     },
+    trustProxy: true,
     requestIdHeader: 'x-request-id',
     genReqId: (req) => {
       const headerVal = req.headers['x-request-id'] || req.headers['x-correlation-id'];
@@ -165,8 +166,13 @@ export async function startServer() {
 
     // Start background webhook queue drainer and ZATCA DLQ retry worker (runs every 5 seconds)
     let queueTimer: NodeJS.Timeout | null = null;
+    let isQueueWorkerBusy = false;
     if (process.env.NODE_ENV !== 'test') {
       queueTimer = setInterval(async () => {
+        if (isQueueWorkerBusy) {
+          return;
+        }
+        isQueueWorkerBusy = true;
         try {
           await drainWebhookQueue();
         } catch {
@@ -176,6 +182,8 @@ export async function startServer() {
           await processPendingDlqRetries(pool);
         } catch {
           // Quiet background DLQ retry
+        } finally {
+          isQueueWorkerBusy = false;
         }
       }, 5000);
       queueTimer.unref();

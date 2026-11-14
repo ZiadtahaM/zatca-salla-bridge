@@ -23,6 +23,14 @@ export function checkDemoRateLimit(ip: string): { allowed: boolean; retryAfterSe
   const windowMs = 60 * 1000;
   const maxRequests = 10;
 
+  if (demoRateLimitMap.size > 1000) {
+    for (const [key, b] of demoRateLimitMap.entries()) {
+      if (now >= b.resetAt) {
+        demoRateLimitMap.delete(key);
+      }
+    }
+  }
+
   const bucket = demoRateLimitMap.get(ip);
   if (!bucket || now >= bucket.resetAt) {
     demoRateLimitMap.set(ip, { count: 1, resetAt: now + windowMs });

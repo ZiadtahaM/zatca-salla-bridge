@@ -1,7 +1,8 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 export type ZatcaEnvironment = 'sandbox' | 'simulation' | 'production';
 
@@ -48,11 +49,20 @@ export function generateZatcaCsr(
   workDir: string,
   input: CsrInput
 ): { privateKeyPem: string; csrPem: string; csrBase64: string } {
-  mkdirSync(workDir, { recursive: true });
+  let effectiveDir = workDir;
+  try {
+    mkdirSync(effectiveDir, { recursive: true });
+    const probe = join(effectiveDir, `.w_probe_${Date.now()}`);
+    writeFileSync(probe, 'ok');
+    rmSync(probe, { force: true });
+  } catch {
+    effectiveDir = join(tmpdir(), `zatca-csr-${Date.now()}-${randomUUID()}`);
+    mkdirSync(effectiveDir, { recursive: true });
+  }
 
-  const keyPath = join(workDir, 'private_key.pem');
-  const csrPath = join(workDir, 'egs.csr');
-  const cnfPath = join(workDir, 'csr.cnf');
+  const keyPath = join(effectiveDir, 'private_key.pem');
+  const csrPath = join(effectiveDir, 'egs.csr');
+  const cnfPath = join(effectiveDir, 'csr.cnf');
 
   const { privateKey } = generateKeyPairSync('ec', {
     namedCurve: 'secp256k1',

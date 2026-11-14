@@ -5,10 +5,10 @@ const IV_LENGTH_BYTES = 12; // Standard GCM 96-bit nonce
 const AUTH_TAG_LENGTH_BYTES = 16; // Standard GCM 128-bit authentication tag
 
 function getMasterKey(): Buffer {
-  const envKey = process.env.ENCRYPTION_MASTER_KEY;
+  const envKey = process.env.ENCRYPTION_MASTER_KEY || process.env.VAULT_KEY_HEX;
   if (process.env.NODE_ENV === 'production') {
     if (!envKey || envKey.includes('default_zatca') || envKey.length < 32) {
-      throw new Error('FATAL: ENCRYPTION_MASTER_KEY must be set to a secure 32-byte secret in production environment.');
+      throw new Error('FATAL: ENCRYPTION_MASTER_KEY (or VAULT_KEY_HEX) must be set to a secure 32-byte secret in production environment.');
     }
   }
   const keyToUse = envKey || 'default_zatca_vault_master_key_32_bytes_len!';

@@ -3,6 +3,7 @@ import { generateKeyPairSync, createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { pool } from '../storage/db.js';
 import { submitInvoiceToFatoora } from '../services/fatoora-dispatcher.js';
 import { processPartialCreditNote, processSallaOrderIntoZatcaInvoice } from '../services/invoice-generator.js';
@@ -510,7 +511,7 @@ async function seedDemoStoreIfNeeded(client: any): Promise<void> {
     ['salla_demo_store', 'enterprise_plus', 'active', subExpiresAt.toISOString()]
   );
 
-  const workDir = join(process.cwd(), '.zatca-demo-keys');
+  const workDir = join(tmpdir(), '.zatca-demo-keys');
   mkdirSync(workDir, { recursive: true });
   const keyPath = join(workDir, 'demo_key.pem');
   const cnfPath = join(workDir, 'demo_cnf.cnf');

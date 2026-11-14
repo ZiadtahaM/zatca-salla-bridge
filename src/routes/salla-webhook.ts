@@ -302,16 +302,23 @@ export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void
         const queueRes = await client.query(
           `INSERT INTO webhook_queue (merchant_id, event_name, idempotency_key, payload, status)
            VALUES ($1, $2, $3, $4::jsonb, 'pending')
-           ON CONFLICT (idempotency_key) DO UPDATE SET status = 'pending'
-           RETURNING id`,
+           ON CONFLICT (idempotency_key) DO UPDATE
+             SET status = CASE
+               WHEN webhook_queue.status IN ('completed', 'failed') THEN webhook_queue.status
+               ELSE 'pending'
+             END
+           RETURNING id, status`,
           [merchantId, payload.event, idempotencyKey, JSON.stringify(payload)]
         );
 
+        const row = queueRes.rows[0];
         return reply.status(200).send({
-          status: 'queued',
-          queue_id: queueRes.rows[0].id,
+          status: row?.status === 'completed' ? 'idempotent_replay' : 'queued',
+          queue_id: row?.id,
           order_id: orderId,
-          message: 'Webhook received and queued for asynchronous ZATCA processing'
+          message: row?.status === 'completed'
+            ? 'Webhook already processed previously'
+            : 'Webhook received and queued for asynchronous ZATCA processing'
         });
       }
 
@@ -1294,6 +1301,13 @@ export async function drainWebhookQueue(poolInstance = pool): Promise<{ processe
   let processed = 0;
   let errors = 0;
   try {
+    // Reset any items that were stuck in 'processing' from a prior crash or container reboot
+    await client.query(
+      `UPDATE webhook_queue
+       SET status = 'pending'
+       WHERE status = 'processing'`
+    );
+
     const res = await client.query(
       `SELECT id, merchant_id, event_name, idempotency_key, payload, attempts
        FROM webhook_queue

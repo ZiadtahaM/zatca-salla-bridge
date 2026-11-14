@@ -1,7 +1,8 @@
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 export function resolveOpenSslBinary(): string {
   const mingwOpenSsl = 'C:\\Program Files\\Git\\mingw64\\bin\\openssl.exe';
@@ -19,10 +20,34 @@ export function generateValidSecp256k1TestCert(workDir: string): {
   privateKeyPem: string;
   certPem: string;
 } {
-  mkdirSync(workDir, { recursive: true });
-  const keyPath = join(workDir, 'ec-secp256k1-privkey.pem');
-  const certPath = join(workDir, 'cert.pem');
-  const cnfPath = join(workDir, 'openssl.cnf');
+  // If cert and key already exist in workDir, reuse them cleanly
+  const existingKeyPath = join(workDir, 'ec-secp256k1-privkey.pem');
+  const existingCertPath = join(workDir, 'cert.pem');
+  if (existsSync(existingKeyPath) && existsSync(existingCertPath)) {
+    try {
+      const privateKey = readFileSync(existingKeyPath, 'utf8');
+      const certPem = readFileSync(existingCertPath, 'utf8');
+      if (privateKey.length > 50 && certPem.length > 50) {
+        return { privateKeyPem: privateKey, certPem };
+      }
+    } catch {}
+  }
+
+  // Use a dedicated, safe scratch path in tmpdir if workDir cannot be created or written to
+  let targetDir = workDir;
+  try {
+    mkdirSync(targetDir, { recursive: true });
+    const testFile = join(targetDir, `.perm_test_${Date.now()}`);
+    writeFileSync(testFile, 'test');
+    rmSync(testFile, { force: true });
+  } catch {
+    targetDir = join(tmpdir(), 'zatca-test-' + randomUUID());
+    mkdirSync(targetDir, { recursive: true });
+  }
+
+  const keyPath = join(targetDir, 'ec-secp256k1-privkey.pem');
+  const certPath = join(targetDir, 'cert.pem');
+  const cnfPath = join(targetDir, 'openssl.cnf');
 
   const { privateKey } = generateKeyPairSync('ec', {
     namedCurve: 'secp256k1',
@@ -1044,7 +1069,17 @@ export function attachStatefulRelationalTestDb(pool: any): void {
     }
 
     if (normalized.includes('FROM invoices WHERE egs_unit_id = $1')) {
-      const filtered = invoices.filter((i) => i.egs_unit_id === params[0]);
+      let filtered = invoices.filter((i) => i.egs_unit_id === params[0]);
+      if (normalized.includes('order_id = $2') || normalized.includes('order_id = $3')) {
+        const orderIdParam = normalized.includes('order_id = $2') ? params[1] : params[2];
+        filtered = filtered.filter((i) => String(i.order_id) === String(orderIdParam));
+        if (normalized.includes("status NOT IN ('rejected', 'rejected_reporting')")) {
+          filtered = filtered.filter((i) => !['rejected', 'rejected_reporting'].includes(i.status));
+        }
+        if (normalized.includes('replaces_invoice_id IS NULL')) {
+          filtered = filtered.filter((i) => !i.replaces_invoice_id);
+        }
+      }
       if (normalized.includes('COUNT(*)') && normalized.includes('SUM(')) {
         const totalNet = filtered.reduce((acc, i) => acc + (Number(i.subtotal) || 0), 0);
         const totalVat = filtered.reduce((acc, i) => acc + (Number(i.tax_total) || 0), 0);
@@ -1062,6 +1097,20 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         };
       }
       return { rows: filtered, rowCount: filtered.length };
+    }
+
+    if (normalized.includes("FROM invoices i JOIN egs_units e") || normalized.includes("WHERE i.status = 'signed'")) {
+      const orphaned = invoices
+        .filter((inv) => inv.status === 'signed' && !zatcaDlq.some((d) => d.invoice_id === inv.id))
+        .map((inv) => {
+          const egs = egsUnits.find((e) => e.id === inv.egs_unit_id);
+          return {
+            id: inv.id,
+            egs_unit_id: inv.egs_unit_id,
+            merchant_id: egs ? egs.merchant_id : 'salla_demo_store'
+          };
+        });
+      return { rows: orphaned, rowCount: orphaned.length };
     }
 
     if (normalized.includes('SELECT * FROM invoices ORDER BY created_at ASC') || normalized.includes('SELECT * FROM invoices')) {
@@ -1232,8 +1281,20 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       return { rows, rowCount: rows.length };
     }
 
+    if (normalized.includes('UPDATE zatca_dlq SET is_stalled = TRUE')) {
+      let count = 0;
+      for (const d of zatcaDlq) {
+        if (!d.resolved_at && (d.attempt_count >= 10)) {
+          d.is_stalled = true;
+          d.resolved_at = new Date();
+          count++;
+        }
+      }
+      return { rows: [], rowCount: count };
+    }
+
     if (normalized.includes('FROM zatca_dlq WHERE resolved_at IS NULL')) {
-      const rows = zatcaDlq.filter((d) => !d.resolved_at);
+      const rows = zatcaDlq.filter((d) => !d.resolved_at && (!d.attempt_count || d.attempt_count < 10));
       return { rows, rowCount: rows.length };
     }
 
@@ -1607,7 +1668,6 @@ export function attachStatefulRelationalTestDb(pool: any): void {
     }
 
     if (normalized.includes('INSERT INTO webhook_queue')) {
-      const id = randomUUID();
       let merchant_id = 'salla_demo_store';
       let event_name = 'order.created';
       let idempotency_key = params[0];
@@ -1617,6 +1677,15 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         [merchant_id, event_name, idempotency_key, payload] = params;
       }
 
+      const existing = webhookQueue.find((w) => w.idempotency_key === idempotency_key);
+      if (existing) {
+        if (!['completed', 'failed'].includes(existing.status)) {
+          existing.status = 'pending';
+        }
+        return { rows: [{ id: existing.id, status: existing.status }], rowCount: 1 };
+      }
+
+      const id = randomUUID();
       const row = {
         id,
         merchant_id,
@@ -1630,7 +1699,7 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         created_at: new Date()
       };
       webhookQueue.push(row);
-      return { rows: [{ id }], rowCount: 1 };
+      return { rows: [{ id, status: 'pending' }], rowCount: 1 };
     }
 
     if (normalized.includes('FROM webhook_queue')) {
@@ -1646,6 +1715,16 @@ export function attachStatefulRelationalTestDb(pool: any): void {
     }
 
     if (normalized.includes('UPDATE webhook_queue SET')) {
+      if (normalized.includes("SET status = 'pending' WHERE status = 'processing'")) {
+        let count = 0;
+        for (const w of webhookQueue) {
+          if (w.status === 'processing') {
+            w.status = 'pending';
+            count++;
+          }
+        }
+        return { rows: [], rowCount: count };
+      }
       const id = params[params.length - 1];
       const row = webhookQueue.find((w) => w.id === id);
       if (row) {

@@ -10,6 +10,7 @@ export interface FatooraDispatchOptions {
   sallaApiBase?: string;
   appBaseUrl?: string;
   customFetch?: typeof fetch;
+  timeoutMs?: number;
 }
 
 export interface FatooraDispatchResult {
@@ -92,11 +93,16 @@ export async function submitInvoiceToFatoora(
     });
   } else {
     const fetchFn = options.customFetch || fetch;
+    const timeoutMs = options.timeoutMs || 30000;
+    const controller = new AbortController();
+    const timeoutTimer = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
       const resp = await fetchFn(targetUrl, {
         method: 'POST',
         headers,
-        body: bodyJson
+        body: bodyJson,
+        signal: controller.signal
       });
       const rawBody = await resp.text();
       const responseHeaders: Record<string, string> = {};
@@ -110,11 +116,17 @@ export async function submitInvoiceToFatoora(
         rawBody
       };
     } catch (err: any) {
+      const isTimeout = err.name === 'AbortError' || err.message?.includes('aborted');
       httpResponse = {
-        statusCode: 503,
+        statusCode: isTimeout ? 504 : 503,
         headers: { 'content-type': 'application/json' },
-        rawBody: JSON.stringify({ error: 'Network transport failure', details: err.message })
+        rawBody: JSON.stringify({
+          error: isTimeout ? 'Gateway request timeout to ZATCA' : 'Network transport failure',
+          details: err.message
+        })
       };
+    } finally {
+      clearTimeout(timeoutTimer);
     }
   }
 
@@ -347,13 +359,26 @@ export async function processPendingDlqRetries(
 ): Promise<{ retriedCount: number; resolvedCount: number; failedCount: number }> {
   const client = await pool.connect();
   try {
+    // 1. Mark exhausted DLQ entries (10+ attempts) as permanently failed
+    await client.query(
+      `UPDATE zatca_dlq
+       SET is_stalled = TRUE,
+           resolved_at = NOW(),
+           failure_reason = failure_reason || ' [MAX_RETRIES_EXCEEDED: 10 attempts]'
+       WHERE resolved_at IS NULL AND attempt_count >= 10`
+    );
+
+    // 2. Select pending retries safely with FOR UPDATE SKIP LOCKED to prevent duplicate dispatch in multi-instance setups
+    await client.query('BEGIN');
     const pendingRes = await client.query(
       `SELECT id, invoice_id, merchant_id, attempt_count
        FROM zatca_dlq
        WHERE resolved_at IS NULL
          AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+         AND attempt_count < 10
        ORDER BY first_failed_at ASC
-       LIMIT 50`
+       LIMIT 50
+       FOR UPDATE SKIP LOCKED`
     );
 
     let retriedCount = 0;
@@ -370,7 +395,13 @@ export async function processPendingDlqRetries(
       }
     }
 
+    await client.query('COMMIT');
     return { retriedCount, resolvedCount, failedCount };
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {}
+    throw err;
   } finally {
     client.release();
   }

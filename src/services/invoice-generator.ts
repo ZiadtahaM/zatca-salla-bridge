@@ -1456,6 +1456,33 @@ export async function processSallaOrderIntoZatcaInvoice(
         }
       }
 
+      if (!overrides?.replacesInvoiceId) {
+        const existingOrderRes = await client.query(
+          `SELECT id, uuid, icv, pih, invoice_hash, qr_code_payload, signed_xml, invoice_type
+           FROM invoices
+           WHERE egs_unit_id = $1 AND order_id = $2
+             AND invoice_type IN ('simplified_tax_invoice', 'tax_invoice')
+             AND replaces_invoice_id IS NULL
+             AND status NOT IN ('rejected', 'rejected_reporting')
+           ORDER BY created_at DESC LIMIT 1`,
+          [egsUnitId, order.id.toString()]
+        );
+        if (existingOrderRes.rows.length > 0) {
+          const row = existingOrderRes.rows[0];
+          await client.query('ROLLBACK');
+          return {
+            invoiceId: row.id,
+            invoiceUuid: row.uuid,
+            icv: Number(row.icv),
+            pih: row.pih,
+            invoiceHash: row.invoice_hash,
+            qrCodeBase64: row.qr_code_payload,
+            signedXml: row.signed_xml,
+            isB2C: row.invoice_type === 'simplified_tax_invoice'
+          };
+        }
+      }
+
       const egsRes = await client.query(
         `SELECT e.id, e.merchant_id, e.branch_id, e.current_icv, e.last_document_hash,
                 e.private_key_pem, e.csid_secret, e.certificate, e.expires_at, e.csid_environment,
@@ -1539,38 +1566,66 @@ export async function processSallaOrderIntoZatcaInvoice(
         isB2C
       });
 
-      const invoiceRes = await client.query(
-        `INSERT INTO invoices (
-          egs_unit_id, order_id, idempotency_key, invoice_type, uuid,
-          icv, pih, invoice_hash, qr_code_payload, signed_xml,
-          status, supply_date, issue_timestamp, replaces_invoice_id, subtotal, tax_total, grand_total,
-          raw_order_payload
-        ) VALUES (
-          $1, $2, $3, $4, $5,
-          $6, $7, $8, $9, $10,
-          'signed', $11, $12, $13, $14, $15, $16,
-          $17
-        ) RETURNING id`,
-        [
-          egs.id,
-          order.id.toString(),
-          idempotencyKey,
-          isB2C ? 'simplified_tax_invoice' : 'tax_invoice',
-          invoiceUuid,
-          nextIcv,
-          currentPih,
-          signed.invoiceHashBase64,
-          signed.qrCodeBase64,
-          signed.signedXml,
-          issueDate,
-          issueDateTimeIsoZ,
-          overrides?.replacesInvoiceId || null,
-          lineExtensionTotal,
-          declaredTaxTotal,
-          grandTotal,
-          JSON.stringify(order)
-        ]
-      );
+      let invoiceRes;
+      try {
+        invoiceRes = await client.query(
+          `INSERT INTO invoices (
+            egs_unit_id, order_id, idempotency_key, invoice_type, uuid,
+            icv, pih, invoice_hash, qr_code_payload, signed_xml,
+            status, supply_date, issue_timestamp, replaces_invoice_id, subtotal, tax_total, grand_total,
+            raw_order_payload
+          ) VALUES (
+            $1, $2, $3, $4, $5,
+            $6, $7, $8, $9, $10,
+            'signed', $11, $12, $13, $14, $15, $16,
+            $17
+          ) RETURNING id`,
+          [
+            egs.id,
+            order.id.toString(),
+            idempotencyKey,
+            isB2C ? 'simplified_tax_invoice' : 'tax_invoice',
+            invoiceUuid,
+            nextIcv,
+            currentPih,
+            signed.invoiceHashBase64,
+            signed.qrCodeBase64,
+            signed.signedXml,
+            issueDate,
+            issueDateTimeIsoZ,
+            overrides?.replacesInvoiceId || null,
+            lineExtensionTotal,
+            declaredTaxTotal,
+            grandTotal,
+            JSON.stringify(order)
+          ]
+        );
+      } catch (insertErr: any) {
+        if (insertErr.code === '23505') {
+          const existingInv = await client.query(
+            `SELECT id, uuid, icv, pih, invoice_hash, qr_code_payload, signed_xml, invoice_type
+             FROM invoices
+             WHERE (idempotency_key = $1 OR (egs_unit_id = $2 AND order_id = $3 AND replaces_invoice_id IS NULL))
+             ORDER BY created_at DESC LIMIT 1`,
+            [idempotencyKey, egs.id, order.id.toString()]
+          );
+          if (existingInv.rows.length > 0) {
+            const row = existingInv.rows[0];
+            await client.query('ROLLBACK');
+            return {
+              invoiceId: row.id,
+              invoiceUuid: row.uuid,
+              icv: Number(row.icv),
+              pih: row.pih,
+              invoiceHash: row.invoice_hash,
+              qrCodeBase64: row.qr_code_payload,
+              signedXml: row.signed_xml,
+              isB2C: row.invoice_type === 'simplified_tax_invoice'
+            };
+          }
+        }
+        throw insertErr;
+      }
 
       await client.query(
         `UPDATE egs_units
@@ -1737,37 +1792,65 @@ export async function processSallaRefundIntoZatcaCreditNote(
       isB2C
     });
 
-    const cnRes = await client.query(
-      `INSERT INTO invoices (
-        egs_unit_id, order_id, idempotency_key, invoice_type, uuid,
-        icv, pih, invoice_hash, qr_code_payload, signed_xml,
-        status, supply_date, issue_timestamp, replaces_invoice_id,
-        subtotal, tax_total, grand_total, raw_order_payload
-      ) VALUES (
-        $1, $2, $3, 'credit_note', $4,
-        $5, $6, $7, $8, $9,
-        'signed', $10, $11, $12, $13, $14, $15,
-        $16
-      ) RETURNING id`,
-      [
-        egs.id,
-        order.id.toString(),
-        idempotencyKey,
-        creditNoteUuid,
-        nextIcv,
-        currentPih,
-        signed.invoiceHashBase64,
-        signed.qrCodeBase64,
-        signed.signedXml,
-        issueDate,
-        issueDateTimeIsoZ,
-        originalInvoice.id,
-        lineExtensionTotal,
-        declaredTaxTotal,
-        grandTotal,
-        JSON.stringify(order)
-      ]
-    );
+    let cnRes;
+    try {
+      cnRes = await client.query(
+        `INSERT INTO invoices (
+          egs_unit_id, order_id, idempotency_key, invoice_type, uuid,
+          icv, pih, invoice_hash, qr_code_payload, signed_xml,
+          status, supply_date, issue_timestamp, replaces_invoice_id,
+          subtotal, tax_total, grand_total, raw_order_payload
+        ) VALUES (
+          $1, $2, $3, 'credit_note', $4,
+          $5, $6, $7, $8, $9,
+          'signed', $10, $11, $12, $13, $14, $15,
+          $16
+        ) RETURNING id`,
+        [
+          egs.id,
+          order.id.toString(),
+          idempotencyKey,
+          creditNoteUuid,
+          nextIcv,
+          currentPih,
+          signed.invoiceHashBase64,
+          signed.qrCodeBase64,
+          signed.signedXml,
+          issueDate,
+          issueDateTimeIsoZ,
+          originalInvoice.id,
+          lineExtensionTotal,
+          declaredTaxTotal,
+          grandTotal,
+          JSON.stringify(order)
+        ]
+      );
+    } catch (insertErr: any) {
+      if (insertErr.code === '23505') {
+        const existingCn = await client.query(
+          `SELECT id, uuid, icv, pih, invoice_hash, qr_code_payload, signed_xml, invoice_type
+           FROM invoices
+           WHERE idempotency_key = $1
+           ORDER BY created_at DESC LIMIT 1`,
+          [idempotencyKey]
+        );
+        if (existingCn.rows.length > 0) {
+          const row = existingCn.rows[0];
+          await client.query('ROLLBACK');
+          return {
+            invoiceId: row.id,
+            invoiceUuid: row.uuid,
+            icv: Number(row.icv),
+            pih: row.pih,
+            invoiceHash: row.invoice_hash,
+            qrCodeBase64: row.qr_code_payload,
+            signedXml: row.signed_xml,
+            isB2C: row.invoice_type === 'simplified_tax_invoice'
+          };
+        }
+      }
+      throw insertErr;
+    }
 
     await client.query(
       `UPDATE egs_units

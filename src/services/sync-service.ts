@@ -265,6 +265,43 @@ export interface OrderSupportDiagnostics {
   };
 }
 
+export function isAllowedSyncStateTransition(
+  fromState: SyncState | null,
+  toState: SyncState,
+  hasRefundContext: boolean = false
+): boolean {
+  if (!fromState || fromState === toState) {
+    return true; // initial state or idempotent update
+  }
+
+  // Once an invoice has been successfully cleared or reported to ZATCA:
+  // It is an immutable statutory tax document. It can never regress to pre-tax states.
+  if (fromState === 'successfully_cleared' || fromState === 'successfully_reported') {
+    if (hasRefundContext) {
+      return true; // Refund or credit note update is permitted
+    }
+    const forbiddenRegressions: SyncState[] = [
+      'not_received', 'received', 'persisted', 'awaiting_processing',
+      'deferred_payment_hold', 'unconfirmed_payment_hold'
+    ];
+    if (forbiddenRegressions.includes(toState)) {
+      return false;
+    }
+  }
+
+  // An order voided due to failed payment cannot jump directly to successful without re-evaluation
+  if (fromState === 'void_payment_failed') {
+    const forbiddenDirectJumps: SyncState[] = [
+      'successfully_cleared', 'successfully_reported', 'successfully_processed'
+    ];
+    if (forbiddenDirectJumps.includes(toState)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export async function transitionOrderSyncState(
   client: PoolClient | Pool,
   input: SyncTransitionInput
@@ -339,6 +376,10 @@ export async function transitionOrderSyncState(
     syncRecordId = existing.id;
     fromState = existing.sync_state as SyncState;
     currentAttempts = Number(existing.attempt_count) + 1;
+
+    if (!isAllowedSyncStateTransition(fromState, input.toState, Boolean(input.sallaRefundId))) {
+      throw new Error(`INVALID_STATE_TRANSITION: Cannot transition order ${input.orderId} from '${fromState}' to '${input.toState}'`);
+    }
 
     const invoiceIdToSave = input.invoiceId !== undefined ? input.invoiceId : existing.invoice_id;
     const invoiceUuidToSave = input.invoiceUuid !== undefined ? input.invoiceUuid : existing.invoice_uuid;

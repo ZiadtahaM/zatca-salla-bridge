@@ -1,7 +1,9 @@
 import Fastify from 'fastify';
 import rawBody from 'fastify-raw-body';
+import { randomUUID } from 'node:crypto';
 import { sallaWebhookRoutes, drainWebhookQueue } from './routes/salla-webhook.js';
 import { processPendingDlqRetries } from './services/fatoora-dispatcher.js';
+import { recordSubmissionFailure } from './services/dlq-monitor.js';
 import { onboardingRoutes } from './routes/onboarding-route.js';
 import { validatorRoutes } from './routes/validator-route.js';
 import { opsRoutes } from './routes/ops-route.js';
@@ -16,6 +18,14 @@ export function buildServer() {
   const app = Fastify({
     logger: {
       level: process.env.LOG_LEVEL || 'info'
+    },
+    requestIdHeader: 'x-request-id',
+    genReqId: (req) => {
+      const headerVal = req.headers['x-request-id'] || req.headers['x-correlation-id'];
+      if (typeof headerVal === 'string' && headerVal.length > 0) {
+        return headerVal;
+      }
+      return `req_${Date.now()}_${randomUUID().slice(0, 8)}`;
     }
   });
 
@@ -63,9 +73,9 @@ export function validateProductionEnvironment(): void {
     return;
   }
   const issues: string[] = [];
-  const masterKey = process.env.ENCRYPTION_MASTER_KEY;
+  const masterKey = process.env.ENCRYPTION_MASTER_KEY || process.env.VAULT_KEY_HEX;
   if (!masterKey || masterKey.includes('default_zatca') || masterKey.length < 32) {
-    issues.push('ENCRYPTION_MASTER_KEY is missing or insecure');
+    issues.push('ENCRYPTION_MASTER_KEY (or VAULT_KEY_HEX) is missing or insecure');
   }
   const sessionSecret = process.env.SESSION_SECRET;
   if (!sessionSecret || sessionSecret.includes('dev_zatca') || sessionSecret.length < 32) {
@@ -77,6 +87,40 @@ export function validateProductionEnvironment(): void {
   }
   if (issues.length > 0) {
     throw new Error(`PRODUCTION_STARTUP_FAILURE: Insecure environment configuration: ${issues.join(', ')}`);
+  }
+}
+
+export async function recoverOrphanedInvoices(poolInstance = pool): Promise<number> {
+  const client = await poolInstance.connect();
+  try {
+    const orphanedRes = await client.query(
+      `SELECT i.id, i.egs_unit_id, e.merchant_id
+       FROM invoices i
+       JOIN egs_units e ON i.egs_unit_id = e.id
+       WHERE i.status = 'signed'
+         AND NOT EXISTS (
+           SELECT 1 FROM zatca_dlq d WHERE d.invoice_id = i.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM zatca_submissions s WHERE s.invoice_id = i.id
+         )
+       LIMIT 100`
+    );
+
+    let recovered = 0;
+    for (const row of orphanedRes.rows) {
+      await recordSubmissionFailure(client, {
+        invoiceId: row.id,
+        merchantId: row.merchant_id,
+        egsUnitId: row.egs_unit_id,
+        failureReason: 'Orphaned signed invoice recovered on startup before ZATCA transmission',
+        httpStatus: 503
+      });
+      recovered++;
+    }
+    return recovered;
+  } finally {
+    client.release();
   }
 }
 
@@ -99,6 +143,16 @@ export async function startServer() {
       server.log.warn(`Webhook queue drain warning on startup: ${queueErr.message}`);
     }
 
+    // Recover orphaned signed invoices that were not yet submitted or enqueued to DLQ
+    try {
+      const recoveredCount = await recoverOrphanedInvoices(pool);
+      if (recoveredCount > 0) {
+        process.stdout.write(`Recovered ${recoveredCount} orphaned signed invoice(s) on startup\n`);
+      }
+    } catch (orphanErr: any) {
+      server.log.warn(`Orphaned invoice recovery warning on startup: ${orphanErr.message}`);
+    }
+
     // Process pending ZATCA DLQ retries on startup
     try {
       const dlqRes = await processPendingDlqRetries(pool);
@@ -110,8 +164,9 @@ export async function startServer() {
     }
 
     // Start background webhook queue drainer and ZATCA DLQ retry worker (runs every 5 seconds)
+    let queueTimer: NodeJS.Timeout | null = null;
     if (process.env.NODE_ENV !== 'test') {
-      const queueTimer = setInterval(async () => {
+      queueTimer = setInterval(async () => {
         try {
           await drainWebhookQueue();
         } catch {
@@ -124,6 +179,27 @@ export async function startServer() {
         }
       }, 5000);
       queueTimer.unref();
+
+      // Graceful drain and shutdown handler (Domain I: GRACEFUL_DRAIN_SHUTDOWN)
+      const shutdown = async (signal: string) => {
+        server.log.info(`Received ${signal}, initiating graceful shutdown...`);
+        if (queueTimer) {
+          clearInterval(queueTimer);
+          queueTimer = null;
+        }
+        try {
+          await server.close();
+          await pool.end();
+          server.log.info('Graceful shutdown completed cleanly.');
+          process.exit(0);
+        } catch (err: any) {
+          server.log.error(err, 'Error during graceful shutdown');
+          process.exit(1);
+        }
+      };
+
+      process.on('SIGTERM', () => shutdown('SIGTERM'));
+      process.on('SIGINT', () => shutdown('SIGINT'));
     }
 
     await server.listen({ port, host });

@@ -907,7 +907,8 @@ export async function executeSafeOrderRecovery(
   client: PoolClient,
   merchantId: string,
   orderId: string,
-  actor: string = 'merchant_portal'
+  actor: string = 'merchant_portal',
+  isDeliveryConfirmed = false
 ): Promise<RecoveryResult> {
   // SAFEGUARD 1: Atomic transaction & advisory lock to reject simultaneous recovery attempts on the same order
   await client.query(
@@ -1104,7 +1105,7 @@ export async function executeSafeOrderRecovery(
     const statusSlug = orderData.status?.slug?.toLowerCase() || '';
     const isDeferred = ['cod', 'cash_on_delivery', 'bank', 'bank_transfer'].includes(paymentMethod);
 
-    if (isDeferred && !['completed', 'delivered'].includes(statusSlug)) {
+    if (isDeferred && !isDeliveryConfirmed && !['completed', 'delivered'].includes(statusSlug)) {
       await transitionOrderSyncState(client, {
         merchantId,
         orderId,

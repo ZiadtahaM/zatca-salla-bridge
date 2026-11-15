@@ -25,7 +25,7 @@ import {
 } from '../services/salla-oauth.js';
 import { createHash } from 'node:crypto';
 import { dispatchMerchantAlert } from '../services/alert-dispatcher.js';
-import { transitionOrderSyncState, SyncState } from '../services/sync-service.js';
+import { transitionOrderSyncState, SyncState, executeSafeOrderRecovery } from '../services/sync-service.js';
 import { submitInvoiceToFatoora, FatooraDispatchResult } from '../services/fatoora-dispatcher.js';
 
 export async function sallaWebhookRoutes(fastify: FastifyInstance): Promise<void> {
@@ -716,16 +716,31 @@ export async function processSallaWebhookPayload(
         nextAction
       }).catch(() => {});
 
+      let recoveryResult: any = null;
+      try {
+        recoveryResult = await executeSafeOrderRecovery(client, merchantId, shipmentOrderId, 'shipment_event', true);
+      } catch {}
+
+      const responseBody: any = {
+        status: isDeliveryCompleted ? 'shipment_delivered' : 'shipment_dispatched',
+        order_id: shipmentOrderId,
+        actual_picked_up_at: actualPickedUpAt,
+        courier_name: courierName || undefined,
+        tracking_number: trackingNumber || undefined,
+        message: `${reason}; proceeding to tax invoice issuance`
+      };
+
+      if (recoveryResult?.success && recoveryResult.invoiceId) {
+        responseBody.invoice_id = recoveryResult.invoiceId;
+        responseBody.invoice_uuid = recoveryResult.invoiceUuid;
+        responseBody.icv = recoveryResult.icv;
+        responseBody.sync_state = recoveryResult.syncState;
+        responseBody.message = `${reason}; tax invoice successfully issued (ICV ${recoveryResult.icv})`;
+      }
+
       return {
         statusCode: 200,
-        body: {
-          status: isDeliveryCompleted ? 'shipment_delivered' : 'shipment_dispatched',
-          order_id: shipmentOrderId,
-          actual_picked_up_at: actualPickedUpAt,
-          courier_name: courierName || undefined,
-          tracking_number: trackingNumber || undefined,
-          message: `${reason}; proceeding to tax invoice issuance`
-        }
+        body: responseBody
       };
     }
 

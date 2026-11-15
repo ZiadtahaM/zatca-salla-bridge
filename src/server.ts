@@ -13,6 +13,8 @@ import { merchantPortalRoutes } from './routes/merchant-portal-route.js';
 import { standaloneApiRoutes } from './routes/standalone-api-route.js';
 import { syncControlRoutes } from './routes/sync-control-route.js';
 import { pool, initializeDatabaseSchema } from './storage/db.js';
+import { checkCsidExpirations } from './services/csid-renewal-worker.js';
+import { checkStalledDlqInvoices } from './services/dlq-monitor.js';
 
 export function buildServer() {
   const app = Fastify({
@@ -164,8 +166,29 @@ export async function startServer() {
       server.log.warn(`ZATCA DLQ retry warning on startup: ${dlqErr.message}`);
     }
 
+    // Check CSID certificate expirations on startup
+    try {
+      const csidStatus = await checkCsidExpirations(pool);
+      if (csidStatus.expiredCount > 0 || csidStatus.renewalDueCount > 0) {
+        process.stdout.write(`CSID check on startup: ${csidStatus.expiredCount} expired, ${csidStatus.renewalDueCount} renewal due\n`);
+      }
+    } catch (csidErr: any) {
+      server.log.warn(`CSID expiration check warning on startup: ${csidErr.message}`);
+    }
+
+    // Check stalled DLQ invoices on startup
+    try {
+      const stalledAlerts = await checkStalledDlqInvoices(pool);
+      if (stalledAlerts.length > 0) {
+        process.stdout.write(`DLQ monitor on startup: ${stalledAlerts.length} stalled invoice(s) detected\n`);
+      }
+    } catch (stalledErr: any) {
+      server.log.warn(`Stalled DLQ check warning on startup: ${stalledErr.message}`);
+    }
+
     // Start background webhook queue drainer and ZATCA DLQ retry worker (runs every 5 seconds)
     let queueTimer: NodeJS.Timeout | null = null;
+    let maintenanceTimer: NodeJS.Timeout | null = null;
     let isQueueWorkerBusy = false;
     if (process.env.NODE_ENV !== 'test') {
       queueTimer = setInterval(async () => {
@@ -188,12 +211,30 @@ export async function startServer() {
       }, 5000);
       queueTimer.unref();
 
+      maintenanceTimer = setInterval(async () => {
+        try {
+          await checkCsidExpirations(pool);
+        } catch {
+          // Quiet background maintenance
+        }
+        try {
+          await checkStalledDlqInvoices(pool);
+        } catch {
+          // Quiet background DLQ monitoring
+        }
+      }, 15 * 60 * 1000);
+      maintenanceTimer.unref();
+
       // Graceful drain and shutdown handler (Domain I: GRACEFUL_DRAIN_SHUTDOWN)
       const shutdown = async (signal: string) => {
         server.log.info(`Received ${signal}, initiating graceful shutdown...`);
         if (queueTimer) {
           clearInterval(queueTimer);
           queueTimer = null;
+        }
+        if (maintenanceTimer) {
+          clearInterval(maintenanceTimer);
+          maintenanceTimer = null;
         }
         try {
           await server.close();

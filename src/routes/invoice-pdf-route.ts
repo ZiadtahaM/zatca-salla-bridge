@@ -79,7 +79,7 @@ async function fetchInvoiceById(id: string): Promise<any | null> {
      FROM invoices i
      LEFT JOIN egs_units e ON e.id = i.egs_unit_id
      LEFT JOIN merchant_tokens m ON m.merchant_id = e.merchant_id
-     WHERE i.id = $1`,
+     WHERE i.id = $1 OR i.uuid = $1`,
     [id]
   );
 

@@ -716,10 +716,25 @@ test('14. Dynamic Seller Identity & Missing-Data Invariant: Zero-mock isolation 
     );
     const incompleteEgsId = incompleteEgsRes.rows[0].id;
 
+    const sessionToken = signMerchantSessionToken(testMerchantId);
+
+    // 1b. Standalone API /api/v1/sign must reject unauthenticated requests with HTTP 401
+    const signResUnauth = await app.inject({
+      method: 'POST',
+      url: '/api/v1/sign',
+      payload: {
+        merchantId: testMerchantId,
+        branchId: 'bare_branch',
+        items: [{ name: 'Test Product', quantity: 1, price: 100.0, taxPercent: 15 }]
+      }
+    });
+    assert.equal(signResUnauth.statusCode, 401, 'Must reject with 401 when unauthenticated');
+
     // 2. Standalone API /api/v1/sign must reject with HTTP 422 MISSING_SELLER_IDENTITY
     const signResMissing = await app.inject({
       method: 'POST',
       url: '/api/v1/sign',
+      headers: { authorization: `Bearer ${sessionToken}` },
       payload: {
         merchantId: testMerchantId,
         branchId: 'bare_branch',
@@ -753,6 +768,7 @@ test('14. Dynamic Seller Identity & Missing-Data Invariant: Zero-mock isolation 
     const signResSuccess = await app.inject({
       method: 'POST',
       url: '/api/v1/sign',
+      headers: { authorization: `Bearer ${sessionToken}` },
       payload: {
         merchantId: testMerchantId,
         branchId: 'bare_branch',

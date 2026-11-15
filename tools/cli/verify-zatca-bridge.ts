@@ -498,6 +498,7 @@ async function runLever(): Promise<void> {
       const extRes = await app.inject({
         method: 'POST',
         url: '/api/v1/sign-and-submit',
+        headers: { authorization: `Bearer ${sessionToken}` },
         payload: {
           merchantId,
           branchId,

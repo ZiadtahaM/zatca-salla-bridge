@@ -191,8 +191,8 @@ export function authenticateMerchantRequest(
     }
   }
 
-  // 5. Public demo store
-  if (requestedMerchant === 'salla_demo_store' || (!requestedMerchant && !expectedMerchantId)) {
+  // 6. Public demo store (strictly disabled in production)
+  if (process.env.NODE_ENV !== 'production' && (requestedMerchant === 'salla_demo_store' || (!requestedMerchant && !expectedMerchantId))) {
     return { authenticated: true, merchantId: 'salla_demo_store', isDemo: true, status: 200 };
   }
 

@@ -217,6 +217,10 @@ export async function syncControlRoutes(fastify: FastifyInstance): Promise<void>
   // 5. Active Synchronization Rules Explanation
   fastify.get('/api/sync/rules', async (request: FastifyRequest, reply: FastifyReply) => {
     const merchantId = extractMerchantId(request);
+    const auth = authenticateMerchantRequest(request, merchantId);
+    if (!auth.authenticated) {
+      return reply.status(auth.status).send({ error: 'UNAUTHORIZED', message: auth.error });
+    }
     const client = await pool.connect();
     try {
       const tokenRes = await client.query(
@@ -256,6 +260,10 @@ export async function syncControlRoutes(fastify: FastifyInstance): Promise<void>
   // 6. Pre-Activation Synchronization Preview
   fastify.get('/api/sync/preview', async (request: FastifyRequest, reply: FastifyReply) => {
     const merchantId = extractMerchantId(request);
+    const auth = authenticateMerchantRequest(request, merchantId);
+    if (!auth.authenticated) {
+      return reply.status(auth.status).send({ error: 'UNAUTHORIZED', message: auth.error });
+    }
     const client = await pool.connect();
     try {
       const preview = await generateSyncPreview(client, merchantId);

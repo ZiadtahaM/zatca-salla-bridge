@@ -467,9 +467,26 @@ export const merchantPortalRoutes: FastifyPluginAsync = async (app: FastifyInsta
         items: body.items
       });
 
+      let dispatchResult: any = null;
+      try {
+        dispatchResult = await submitInvoiceToFatoora(client, result.invoiceId);
+      } catch (dispErr: any) {
+        dispatchResult = {
+          invoiceId: result.invoiceId,
+          invoiceUuid: result.invoiceUuid,
+          status: 'queued_dlq_retry',
+          httpStatus: 503,
+          message: dispErr.message
+        };
+      }
+
       return reply.status(200).send({
         success: true,
-        creditNote: result
+        creditNote: {
+          ...result,
+          status: dispatchResult?.status || 'signed',
+          dispatchResult
+        }
       });
     } catch (err: any) {
       return reply.status(400).send({

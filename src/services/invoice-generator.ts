@@ -326,7 +326,7 @@ export function buildUblXmlFromSallaOrder(options: BuildUblXmlOptions): string {
     customerPartyBlock = `  <cac:AccountingCustomerParty>
     <cac:Party>
       <cac:PartyIdentification>
-        <cbc:ID schemeID="CRN">7000000001</cbc:ID>
+        <cbc:ID schemeID="CRN">${(options.order.customer as any)?.crn || (options.order.customer as any)?.commercial_number || (options.order.customer as any)?.company_id || '7000000001'}</cbc:ID>
       </cac:PartyIdentification>
       <cac:PostalAddress>
         <cbc:StreetName>${options.order.shipping?.address?.street || 'Commercial Street'}</cbc:StreetName>
@@ -650,7 +650,7 @@ export function buildUblCreditNoteXmlFromSallaRefund(options: {
     : `  <cac:AccountingCustomerParty>
     <cac:Party>
       <cac:PartyIdentification>
-        <cbc:ID schemeID="CRN">7000000001</cbc:ID>
+        <cbc:ID schemeID="CRN">${(options.order.customer as any)?.crn || (options.order.customer as any)?.commercial_number || (options.order.customer as any)?.company_id || '7000000001'}</cbc:ID>
       </cac:PartyIdentification>
       <cac:PostalAddress>
         <cbc:StreetName>${options.order.shipping?.address?.street || 'Commercial Street'}</cbc:StreetName>
@@ -866,7 +866,7 @@ export function buildUblDebitNoteXml(options: {
     : `  <cac:AccountingCustomerParty>
     <cac:Party>
       <cac:PartyIdentification>
-        <cbc:ID schemeID="CRN">7000000001</cbc:ID>
+        <cbc:ID schemeID="CRN">${(options.order.customer as any)?.crn || (options.order.customer as any)?.commercial_number || (options.order.customer as any)?.company_id || '7000000001'}</cbc:ID>
       </cac:PartyIdentification>
       <cac:PostalAddress>
         <cbc:StreetName>${options.order.shipping?.address?.street || 'Commercial Street'}</cbc:StreetName>
@@ -2113,7 +2113,7 @@ export async function processPartialCreditNote(
         tax_total,
         grand_total,
         currency
-      ) VALUES ($1, $2, $3, 'credit_note', $4, $5, $6, $7, $8, $9, 'reported', $10, $11, $12, $13, $14, $15, $16)
+      ) VALUES ($1, $2, $3, 'credit_note', $4, $5, $6, $7, $8, $9, 'signed', $10, $11, $12, $13, $14, $15, $16)
       RETURNING id, uuid, icv, status, grand_total, currency`,
       [
         egs.id,

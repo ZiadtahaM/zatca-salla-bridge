@@ -28,8 +28,11 @@ export const SallaCustomerSchema = z.object({
   mobile: z.string().optional().nullable(),
   email: z.string().optional().nullable(),
   company_name: z.string().optional().nullable(),
-  tax_number: z.string().optional().nullable()
-});
+  tax_number: z.string().optional().nullable(),
+  crn: z.string().optional().nullable(),
+  commercial_number: z.string().optional().nullable(),
+  company_id: z.string().optional().nullable()
+}).passthrough();
 
 export const SallaAddressSchema = z.object({
   country: z.string().default('SA'),

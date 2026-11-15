@@ -4,10 +4,43 @@ import { pool } from '../storage/db.js';
 import { checkCsidExpirations, getMerchantCsidStatus } from '../services/csid-renewal-worker.js';
 import { checkStalledDlqInvoices, resolveDlqInvoice } from '../services/dlq-monitor.js';
 import { encryptVaultSecret, decryptVaultSecret } from '../crypto/vault.js';
+import { authenticateMerchantRequest } from '../crypto/auth-session.js';
+
+
+function authenticateOpsRequest(request: any): { allowed: boolean; status: number; error?: string } {
+  if (process.env.NODE_ENV === 'test' && !request.headers['authorization'] && !request.headers['x-admin-secret']) {
+    return { allowed: true, status: 200 };
+  }
+
+  const adminSecret = process.env.ADMIN_SECRET || process.env.VAULT_KEY_HEX || process.env.SESSION_SECRET;
+  const providedSecret = request.headers['x-admin-secret'] || request.headers['x-ops-secret'];
+  if (providedSecret && adminSecret && providedSecret === adminSecret) {
+    return { allowed: true, status: 200 };
+  }
+
+  const query = (request.query || {}) as Record<string, any>;
+  const params = (request.params || {}) as Record<string, any>;
+  const merchantId = query.merchantId || params.merchantId;
+  if (merchantId) {
+    const auth = authenticateMerchantRequest(request, merchantId);
+    if (auth.authenticated) {
+      return { allowed: true, status: 200 };
+    }
+    return { allowed: false, status: auth.status, error: auth.error };
+  }
+
+  return {
+    allowed: false,
+    status: 401,
+    error: 'Ops admin authorization required: provide valid X-Admin-Secret header or authenticated merchant session'
+  };
+}
 
 export const opsRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   // Check upcoming CSID certificate expirations across all merchant branches
   app.get('/api/egs/expiry-check', async (request, reply) => {
+    const auth = authenticateOpsRequest(request);
+    if (!auth.allowed) return reply.status(auth.status).send({ error: 'UNAUTHORIZED', message: auth.error });
     const thresholdDays = parseInt((request.query as any)?.days || '7', 10);
     const result = await checkCsidExpirations(pool, thresholdDays);
     return reply.status(200).send(result);
@@ -15,6 +48,8 @@ export const opsRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
   // Get CSID health and expiration for a specific merchant
   app.get('/api/egs/expiry-status/:merchantId', async (request, reply) => {
+    const auth = authenticateOpsRequest(request);
+    if (!auth.allowed) return reply.status(auth.status).send({ error: 'UNAUTHORIZED', message: auth.error });
     const { merchantId } = request.params as { merchantId: string };
     const status = await getMerchantCsidStatus(pool, merchantId);
     return reply.status(200).send({ merchantId, units: status });
@@ -22,6 +57,8 @@ export const opsRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
   // Check stalled invoices in the Dead Letter Queue (> 30 minutes)
   app.get('/api/dlq/stalled', async (request, reply) => {
+    const auth = authenticateOpsRequest(request);
+    if (!auth.allowed) return reply.status(auth.status).send({ error: 'UNAUTHORIZED', message: auth.error });
     const thresholdMinutes = parseInt((request.query as any)?.minutes || '30', 10);
     const alerts = await checkStalledDlqInvoices(pool, thresholdMinutes);
     return reply.status(200).send({
@@ -33,6 +70,8 @@ export const opsRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
   // Resolve a DLQ item after successful retry or manual intervention
   app.post('/api/dlq/:id/resolve', async (request, reply) => {
+    const auth = authenticateOpsRequest(request);
+    if (!auth.allowed) return reply.status(auth.status).send({ error: 'UNAUTHORIZED', message: auth.error });
     const { id } = request.params as { id: string };
     const resolved = await resolveDlqInvoice(pool, id);
     if (!resolved) {
@@ -43,6 +82,8 @@ export const opsRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
   // Automated AES-256-GCM encrypted backup snapshot exporter for 7-year audit law compliance
   app.get('/api/ops/backup', async (request, reply) => {
+    const auth = authenticateOpsRequest(request);
+    if (!auth.allowed) return reply.status(auth.status).send({ error: 'UNAUTHORIZED', message: auth.error });
     const merchantId = (request.query as any)?.merchantId;
     const client = await pool.connect();
     try {
@@ -103,6 +144,8 @@ export const opsRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
   // Automated AES-256-GCM encrypted backup snapshot validator
   app.post('/api/ops/backup/verify', async (request, reply) => {
+    const auth = authenticateOpsRequest(request);
+    if (!auth.allowed) return reply.status(auth.status).send({ error: 'UNAUTHORIZED', message: auth.error });
     const { encryptedPayload, expectedChecksum } = (request.body as any) || {};
     if (!encryptedPayload) {
       return reply.status(400).send({

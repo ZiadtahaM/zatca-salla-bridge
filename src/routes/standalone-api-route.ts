@@ -6,6 +6,7 @@ import { signZatcaInvoiceExact } from '../crypto/zatca-signer.js';
 import { buildUblXmlFromSallaOrder } from '../services/invoice-generator.js';
 import { SallaOrderData } from '../types/salla.js';
 import { submitInvoiceToFatoora } from '../services/fatoora-dispatcher.js';
+import { authenticateMerchantRequest } from '../crypto/auth-session.js';
 
 export const StandaloneItemSchema = z.object({
   name: z.string(),
@@ -52,6 +53,14 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
     }
 
     const { merchantId, branchId, isB2C, currency, items, discounts, shipping, customer } = parsed.data;
+
+    const auth = authenticateMerchantRequest(request, merchantId);
+    if (!auth.authenticated) {
+      return reply.status(auth.status).send({
+        error: auth.status === 403 ? 'FORBIDDEN' : 'UNAUTHORIZED',
+        message: auth.error
+      });
+    }
 
     const client = await pool.connect();
     try {
@@ -218,6 +227,14 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
     }
 
     const { merchantId, branchId, isB2C, currency, items, discounts, shipping, customer } = parsed.data;
+
+    const auth = authenticateMerchantRequest(request, merchantId);
+    if (!auth.authenticated) {
+      return reply.status(auth.status).send({
+        error: auth.status === 403 ? 'FORBIDDEN' : 'UNAUTHORIZED',
+        message: auth.error
+      });
+    }
 
     const client = await pool.connect();
     try {
@@ -401,16 +418,32 @@ export const standaloneApiRoutes: FastifyPluginAsync = async (app: FastifyInstan
 
       const invoiceId = invRes.rows[0].id;
 
+      let dispatchResult: any = null;
+      try {
+        dispatchResult = await submitInvoiceToFatoora(client, invoiceId);
+      } catch (dispErr: any) {
+        dispatchResult = {
+          invoiceId,
+          invoiceUuid,
+          status: 'queued_dlq_retry',
+          httpStatus: 503,
+          message: dispErr.message
+        };
+      }
+
+      const finalStatus = dispatchResult?.status || initialStatus;
+
       return reply.status(200).send({
-        success: true,
+        success: finalStatus === 'cleared' || finalStatus === 'reported' || finalStatus === 'duplicate_recovered' || finalStatus === 'queued_dlq_retry',
         invoiceId,
         invoiceUuid,
         icv,
         pih,
-        status: initialStatus,
+        status: finalStatus,
+        dispatchResult,
         invoiceHash: signed.invoiceHashBase64,
-        qrCodeBase64: signed.qrCodeBase64,
-        signedXml: signed.signedXml,
+        qrCodeBase64: dispatchResult?.qrCode || signed.qrCodeBase64,
+        signedXml: dispatchResult?.clearedXml || signed.signedXml,
         isB2C,
         totals: {
           subtotal: netSubtotal,

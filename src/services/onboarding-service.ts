@@ -312,15 +312,10 @@ export async function onboardEgsUnit(
     await apiClient.submitComplianceInvoice('<dummy-cn/>', 'dummy-hash-3', 'uuid-3', ccsidRes.binarySecurityToken, ccsidRes.secret);
   }
 
-  // 3. Exchange Compliance CSID for Production CSID (or retain CCSID if sandbox)
-  let finalCertBase64 = ccsidRes.binarySecurityToken;
-  let finalSecret = ccsidRes.secret;
-
-  if (env === 'production' || env === 'simulation') {
-    const pcsidRes = await apiClient.requestProductionCsid(ccsidRes.requestID, ccsidRes.binarySecurityToken, ccsidRes.secret);
-    finalCertBase64 = pcsidRes.binarySecurityToken;
-    finalSecret = pcsidRes.secret;
-  }
+  // 3. Exchange Compliance CSID for Production CSID (required across all environments including sandbox)
+  const pcsidRes = await apiClient.requestProductionCsid(ccsidRes.requestID, ccsidRes.binarySecurityToken, ccsidRes.secret);
+  const finalCertBase64 = pcsidRes.binarySecurityToken;
+  const finalSecret = pcsidRes.secret;
 
   const wrappedCertBase64 = (finalCertBase64.replace(/\s+/g, '').match(/.{1,64}/g) || []).join('\n');
   const certPem = `-----BEGIN CERTIFICATE-----\n${wrappedCertBase64}\n-----END CERTIFICATE-----\n`;

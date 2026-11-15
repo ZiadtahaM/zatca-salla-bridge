@@ -19,7 +19,7 @@ import { attachStatefulRelationalTestDb, generateValidSecp256k1TestCert } from '
 import { encryptVaultSecret } from '../src/crypto/vault.js';
 import { submitInvoiceToFatoora } from '../src/services/fatoora-dispatcher.js';
 import { classifyGatewayResponse } from '../src/services/outage-classifier.js';
-import { MockZatcaApiClient, LiveZatcaApiClient, renewProductionCsid } from '../src/services/onboarding-service.js';
+import { MockZatcaApiClient, LiveZatcaApiClient, renewProductionCsid, onboardEgsUnit } from '../src/services/onboarding-service.js';
 import { Pool } from 'pg';
 
 function createBaseMockOrder(): SallaOrderData {
@@ -1827,6 +1827,71 @@ test('Discourse Edge Case 21: CSID Renewal Sanitizes Certificate and Decrypts CS
     } else {
       delete process.env.ZATCA_USE_LIVE_GATEWAY;
     }
+    client.release();
+    await pool.end();
+  }
+});
+
+test('Discourse Edge Case 22: Sandbox Environment Exchanges Compliance CSID for Test Production CSID', async () => {
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
+  try {
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase22');
+    const { certPem } = generateValidSecp256k1TestCert(certDir);
+    const cleanCert = certPem
+      .replace(/-----BEGIN CERTIFICATE-----/g, '')
+      .replace(/-----END CERTIFICATE-----/g, '')
+      .replace(/\s+/g, '');
+
+    let productionCsidRequested = false;
+    let complianceRequestIdPassed = '';
+
+    const mockSandboxClient = {
+      async requestComplianceCsid(_csr: string, _otp: string) {
+        return {
+          requestID: 'COMP-REQ-12345',
+          binarySecurityToken: cleanCert,
+          secret: 'comp_secret_123'
+        };
+      },
+      async submitComplianceInvoice() {
+        return true;
+      },
+      async requestProductionCsid(complianceRequestId: string, token: string, secret: string) {
+        productionCsidRequested = true;
+        complianceRequestIdPassed = complianceRequestId;
+        assert.equal(token, cleanCert);
+        assert.equal(secret, 'comp_secret_123');
+        return {
+          requestID: 'PROD-REQ-67890',
+          binarySecurityToken: cleanCert,
+          secret: 'test_production_secret_xyz'
+        };
+      }
+    };
+
+    const workDir = join(process.cwd(), '.zatca-test-onboard-edge22');
+    const result = await onboardEgsUnit(
+      client,
+      {
+        merchantId: 'salla_demo_store',
+        branchId: 'main',
+        storeName: 'متجر اختبار الساندبوكس',
+        vatNumber: '310123456700003',
+        otp: '123456',
+        environment: 'sandbox',
+        invoiceType: '1100'
+      },
+      workDir,
+      mockSandboxClient as any
+    );
+
+    assert.ok(result.egsUnitId);
+    assert.equal(productionCsidRequested, true, 'Sandbox onboarding MUST exchange Compliance CSID for test Production CSID');
+    assert.equal(complianceRequestIdPassed, 'COMP-REQ-12345', 'Must pass compliance request ID to production CSID exchange');
+  } finally {
     client.release();
     await pool.end();
   }

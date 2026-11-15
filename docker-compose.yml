@@ -22,19 +22,42 @@ services:
     container_name: zatca-bridge
     restart: unless-stopped
     environment:
+      NODE_ENV: ${NODE_ENV:-production}
       DATABASE_URL: ${DATABASE_URL:-postgres://zatca_admin:secret_zatca_password@postgres:5432/zatca_ledger}
       PORT: 3000
       HOST: 0.0.0.0
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      APP_BASE_URL: ${APP_BASE_URL:-https://${APP_DOMAIN:-localhost}}
+      SALLA_CLIENT_ID: ${SALLA_CLIENT_ID:-}
+      SALLA_CLIENT_SECRET: ${SALLA_CLIENT_SECRET:-}
       SALLA_WEBHOOK_SECRET: ${SALLA_WEBHOOK_SECRET:-dev_salla_webhook_secret_fallback}
       SESSION_SECRET: ${SESSION_SECRET:-dev_zatca_session_secret_32_characters_minimum}
       VAULT_KEY_HEX: ${VAULT_KEY_HEX:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
       ZATCA_ENV: ${ZATCA_ENV:-sandbox}
+      ZATCA_USE_LIVE_GATEWAY: ${ZATCA_USE_LIVE_GATEWAY:-false}
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       postgres:
         condition: service_healthy
 
+  caddy:
+    image: caddy:2-alpine
+    container_name: zatca-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - zatca-bridge
+
 volumes:
   zatca_pgdata:
+  caddy_data:
+  caddy_config:

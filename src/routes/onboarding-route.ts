@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { pool } from '../storage/db.js';
 import { onboardEgsUnit, renewProductionCsid, MockZatcaApiClient, LiveZatcaApiClient } from '../services/onboarding-service.js';
+import { authenticateMerchantRequest } from '../crypto/auth-session.js';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
 
@@ -39,6 +40,14 @@ export async function onboardingRoutes(fastify: FastifyInstance): Promise<void> 
       return reply.status(400).send({
         error: 'LIABILITY_ACCEPTANCE_REQUIRED',
         message: 'You must review and accept the ZATCA Cutover Guidelines and Platform Liability Terms before enabling production invoicing.'
+      });
+    }
+
+    const auth = authenticateMerchantRequest(request, parseResult.data.merchantId);
+    if (!auth.authenticated && (process.env.NODE_ENV === 'production' || request.headers.authorization || request.headers.cookie)) {
+      return reply.status(auth.status).send({
+        error: auth.status === 403 ? 'FORBIDDEN' : 'UNAUTHORIZED',
+        message: auth.error || 'Merchant authentication required'
       });
     }
 
@@ -101,16 +110,11 @@ export async function onboardingRoutes(fastify: FastifyInstance): Promise<void> 
         return reply.status(404).send({ error: 'EGS_NOT_FOUND', message: `EGS unit ${id} not found` });
       }
       const egsUnitMerchant = egsCheck.rows[0].merchant_id;
-      const callerMerchant = (
-        (request.headers['x-merchant-id'] || '') ||
-        (request.headers['x-tenant-id'] || '') ||
-        ((request.body as any)?.merchantId || '')
-      ).toString().trim();
-
-      if (callerMerchant && callerMerchant !== egsUnitMerchant) {
-        return reply.status(403).send({
-          error: 'FORBIDDEN',
-          message: 'Cross-tenant CSID renewal prohibited. You cannot renew an EGS unit belonging to another merchant.'
+      const auth = authenticateMerchantRequest(request, egsUnitMerchant);
+      if (!auth.authenticated && (process.env.NODE_ENV === 'production' || auth.status === 403 || request.headers['x-merchant-id'] || request.headers.authorization || request.headers.cookie)) {
+        return reply.status(auth.status).send({
+          error: auth.status === 403 ? 'FORBIDDEN' : 'UNAUTHORIZED',
+          message: auth.error || 'Merchant session authentication required'
         });
       }
 

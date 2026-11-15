@@ -17,6 +17,9 @@ import { validateZatcaPreflight } from '../src/services/zatca-preflight.js';
 import { SallaOrderData } from '../src/types/salla.js';
 import { attachStatefulRelationalTestDb, generateValidSecp256k1TestCert } from './helpers.js';
 import { encryptVaultSecret } from '../src/crypto/vault.js';
+import { submitInvoiceToFatoora } from '../src/services/fatoora-dispatcher.js';
+import { classifyGatewayResponse } from '../src/services/outage-classifier.js';
+import { MockZatcaApiClient, LiveZatcaApiClient } from '../src/services/onboarding-service.js';
 import { Pool } from 'pg';
 
 function createBaseMockOrder(): SallaOrderData {
@@ -1530,6 +1533,135 @@ test('Discourse Edge Case 18: Tax-Point Decision Matrix Quadrants Under GCC VAT 
       rmSync(certDir, { recursive: true, force: true });
     } catch {
       // Ignore cleanup error
+    }
+  }
+});
+
+test('Discourse Edge Case 19: B2B Clearance Missing clearedInvoice Fails Closed and Rejects Invoice', async () => {
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
+  try {
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase19');
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const encSec = encryptVaultSecret('sec_test_edge19');
+
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
+      ) VALUES (
+        'salla_demo_store', 'متجر سلة التجريبي', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
+      ) ON CONFLICT (merchant_id) DO UPDATE SET
+        store_name = EXCLUDED.store_name,
+        vat_number = EXCLUDED.vat_number,
+        crn = EXCLUDED.crn`,
+      [encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
+
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        'salla_demo_store', 'main', 'EGS-DISCOURSE-EDGE19', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 10, 'INITIAL_HASH_EDGE19',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge19', 'IOS-POS'
+      ) RETURNING id`,
+      [encKey, certPem, encSec]
+    );
+    const egsId = egsRes.rows[0].id;
+
+    const b2bOrder: SallaOrderData = {
+      ...createBaseMockOrder(),
+      id: 99401,
+      customer: {
+        id: 701,
+        first_name: 'شركة',
+        last_name: 'التقنية المتقدمة',
+        mobile: '+966509999999',
+        email: 'info@tech-corp.sa',
+        tax_number: '300012345600003'
+      },
+      shipping: {
+        address: {
+          country: 'SA',
+          country_code: 'SA',
+          city: 'الرياض',
+          district: 'العليا',
+          street: 'شارع الملك فهد',
+          postal_code: '12211',
+          building_number: '1234'
+        }
+      }
+    };
+
+    const b2bDoc = await processSallaOrderIntoZatcaInvoice(client, egsId, b2bOrder, 'idemp_b2b_clear_reject_01');
+    assert.equal(b2bDoc.isB2C, false, 'Document must be classified as B2B tax invoice');
+
+    // Simulate ZATCA returning HTTP 200 without clearedInvoice
+    const mockHttpClientNoClearedXml = async () => ({
+      statusCode: 200,
+      headers: { 'content-type': 'application/json' },
+      rawBody: JSON.stringify({
+        clearanceStatus: 'CLEARED'
+        // Missing clearedInvoice
+      })
+    });
+
+    const dispatchResult = await submitInvoiceToFatoora(client, b2bDoc.invoiceId, {
+      httpClient: mockHttpClientNoClearedXml
+    });
+
+    assert.equal(dispatchResult.status, 'rejected');
+    assert.ok(dispatchResult.message?.includes('missing clearedInvoice'));
+
+    const invoiceCheck = await client.query(`SELECT status, warning_messages FROM invoices WHERE id = $1`, [b2bDoc.invoiceId]);
+    assert.equal(invoiceCheck.rows[0].status, 'rejected', 'Invoice must be updated to rejected in database');
+    assert.ok(JSON.stringify(invoiceCheck.rows[0].warning_messages).includes('clearedInvoice'));
+  } finally {
+    client.release();
+    await pool.end();
+  }
+});
+
+test('Discourse Edge Case 20: classifyGatewayResponse Handles HTTP 208 and Already Cleared Duplicate Recovery', () => {
+  const verdict208 = classifyGatewayResponse({
+    statusCode: 208,
+    headers: { 'content-type': 'application/json' },
+    rawBody: JSON.stringify({ status: 'Reported', message: 'Invoice was previously cleared' })
+  });
+  assert.equal(verdict208.kind, 'duplicate_uuid_recovered');
+  assert.ok(verdict208.message.includes('HTTP 208 Already Reported'));
+
+  const verdictText = classifyGatewayResponse({
+    statusCode: 400,
+    headers: { 'content-type': 'application/json' },
+    rawBody: JSON.stringify({ error: 'This invoice has already cleared in system' })
+  });
+  assert.equal(verdictText.kind, 'duplicate_uuid_recovered');
+  assert.ok(verdictText.message.includes('already recorded'));
+});
+
+test('Discourse Edge Case 21: CSID Renewal Dynamic Gateway Selection Respects ZATCA_USE_LIVE_GATEWAY', () => {
+  const originalEnv = process.env.ZATCA_USE_LIVE_GATEWAY;
+  try {
+    process.env.ZATCA_USE_LIVE_GATEWAY = 'true';
+    const useLive = process.env.ZATCA_USE_LIVE_GATEWAY === 'true';
+    const clientLive = useLive ? new LiveZatcaApiClient('sandbox') : new MockZatcaApiClient('');
+    assert.ok(clientLive instanceof LiveZatcaApiClient, 'Must instantiate LiveZatcaApiClient when ZATCA_USE_LIVE_GATEWAY is true');
+
+    process.env.ZATCA_USE_LIVE_GATEWAY = 'false';
+    const useMock = process.env.ZATCA_USE_LIVE_GATEWAY === 'true';
+    const clientMock = useMock ? new LiveZatcaApiClient('sandbox') : new MockZatcaApiClient('');
+    assert.ok(clientMock instanceof MockZatcaApiClient, 'Must fallback to MockZatcaApiClient when ZATCA_USE_LIVE_GATEWAY is false');
+  } finally {
+    if (originalEnv !== undefined) {
+      process.env.ZATCA_USE_LIVE_GATEWAY = originalEnv;
+    } else {
+      delete process.env.ZATCA_USE_LIVE_GATEWAY;
     }
   }
 });

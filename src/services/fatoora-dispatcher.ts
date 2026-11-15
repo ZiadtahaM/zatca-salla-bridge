@@ -138,7 +138,24 @@ export async function submitInvoiceToFatoora(
     let finalClearedXml = null;
     let finalQrCode = row.qr_code_payload;
 
-    if (isB2B && responseData.clearedInvoice) {
+    if (isB2B) {
+      if (!responseData.clearedInvoice) {
+        await client.query(
+          `UPDATE invoices
+           SET status = 'rejected',
+               warning_messages = jsonb_build_object('error', 'Missing mandatory clearedInvoice in ZATCA clearance response'),
+               updated_at = NOW()
+           WHERE id = $1`,
+          [invoiceId]
+        );
+        return {
+          invoiceId,
+          invoiceUuid: row.uuid,
+          status: 'rejected',
+          httpStatus: httpResponse.statusCode,
+          message: 'B2B invoice rejected: missing clearedInvoice from ZATCA'
+        };
+      }
       try {
         finalClearedXml = Buffer.from(responseData.clearedInvoice, 'base64').toString('utf8');
       } catch {

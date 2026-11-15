@@ -110,16 +110,21 @@ export function classifyGatewayResponse(res: HttpResponse): GatewayVerdict {
 
   const lowerBody = res.rawBody.toLowerCase();
   const isDuplicate =
+    res.statusCode === 208 ||
     lowerBody.includes('reported_successfully_earlier') ||
     lowerBody.includes('invoice_already_reported') ||
     lowerBody.includes('already exists') ||
+    lowerBody.includes('already cleared') ||
+    lowerBody.includes('already_cleared') ||
     (res.statusCode === 409 && (lowerBody.includes('duplicate') || lowerBody.includes('uuid')));
 
   if (isDuplicate) {
     return {
       kind: 'duplicate_uuid_recovered',
       data: json,
-      message: 'Invoice UUID already recorded by ZATCA during previous network attempt'
+      message: res.statusCode === 208
+        ? 'Invoice was already cleared by ZATCA (HTTP 208 Already Reported)'
+        : 'Invoice UUID already recorded by ZATCA during previous network attempt'
     };
   }
 

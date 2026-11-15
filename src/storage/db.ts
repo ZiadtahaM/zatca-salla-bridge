@@ -262,6 +262,7 @@ export async function initializeDatabaseSchema(): Promise<void> {
           processed_at TIMESTAMPTZ
       );
       ALTER TABLE webhook_queue ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+      ALTER TABLE webhook_queue ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
       CREATE INDEX IF NOT EXISTS idx_webhook_queue_pending ON webhook_queue (status, created_at);
 
       CREATE TABLE IF NOT EXISTS order_sync_records (

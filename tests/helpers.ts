@@ -1223,6 +1223,10 @@ export function attachStatefulRelationalTestDb(pool: any): void {
         inv.status = params[0];
         inv.cleared_xml = params[1];
         inv.qr_code_payload = params[2];
+        const warningMatch = sql.match(/jsonb_build_object\s*\(\s*'error'\s*,\s*'([^']+)'\s*\)/i);
+        if (warningMatch) {
+          inv.warning_messages = { error: warningMatch[1] };
+        }
         inv.updated_at = new Date();
       }
       return { rows: [], rowCount: inv ? 1 : 0 };
@@ -1244,6 +1248,10 @@ export function attachStatefulRelationalTestDb(pool: any): void {
           inv.status = params[1];
         } else if (params && params.length >= 2 && normalized.includes('status = $1')) {
           inv.status = params[0];
+        }
+        const warningMatch = sql.match(/jsonb_build_object\s*\(\s*'error'\s*,\s*'([^']+)'\s*\)/i);
+        if (warningMatch) {
+          inv.warning_messages = { error: warningMatch[1] };
         }
         inv.updated_at = new Date();
       }
@@ -1715,7 +1723,7 @@ export function attachStatefulRelationalTestDb(pool: any): void {
     }
 
     if (normalized.includes('UPDATE webhook_queue SET')) {
-      if (normalized.includes("SET status = 'pending' WHERE status = 'processing'")) {
+      if (normalized.includes("SET status = 'pending'") && normalized.includes("status = 'processing'")) {
         let count = 0;
         for (const w of webhookQueue) {
           if (w.status === 'processing') {
@@ -1724,6 +1732,14 @@ export function attachStatefulRelationalTestDb(pool: any): void {
           }
         }
         return { rows: [], rowCount: count };
+      }
+      if (normalized.includes('WHERE id IN')) {
+        const pending = webhookQueue.filter((w) => w.status === 'pending').slice(0, 20);
+        for (const w of pending) {
+          w.status = 'processing';
+          w.attempts = (w.attempts || 0) + 1;
+        }
+        return { rows: pending, rowCount: pending.length };
       }
       const id = params[params.length - 1];
       const row = webhookQueue.find((w) => w.id === id);

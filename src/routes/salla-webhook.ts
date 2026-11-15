@@ -1301,44 +1301,46 @@ export async function drainWebhookQueue(poolInstance = pool): Promise<{ processe
   let processed = 0;
   let errors = 0;
   try {
-    // Reset any items that were stuck in 'processing' from a prior crash or container reboot
+    // Reset any items that were stuck in 'processing' from a prior crash or container reboot (> 5 minutes)
     await client.query(
       `UPDATE webhook_queue
-       SET status = 'pending'
-       WHERE status = 'processing'`
+       SET status = 'pending', updated_at = NOW()
+       WHERE status = 'processing' AND updated_at < NOW() - INTERVAL '5 minutes'`
     );
 
+    await client.query('BEGIN');
     const res = await client.query(
-      `SELECT id, merchant_id, event_name, idempotency_key, payload, attempts
-       FROM webhook_queue
-       WHERE status = 'pending'
-       ORDER BY created_at ASC
-       LIMIT 50
-       FOR UPDATE SKIP LOCKED`
+      `UPDATE webhook_queue
+       SET status = 'processing', attempts = attempts + 1, updated_at = NOW()
+       WHERE id IN (
+         SELECT id FROM webhook_queue
+         WHERE status = 'pending'
+         ORDER BY created_at ASC
+         LIMIT 20
+         FOR UPDATE SKIP LOCKED
+       )
+       RETURNING id, merchant_id, event_name, idempotency_key, payload, attempts`
     );
+    await client.query('COMMIT');
 
     for (const row of res.rows) {
       try {
-        await client.query(
-          `UPDATE webhook_queue SET status = 'processing', attempts = attempts + 1 WHERE id = $1`,
-          [row.id]
-        );
         const rawPayload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
         const result = await processSallaWebhookPayload(client, rawPayload);
         if (result.statusCode >= 400 && result.statusCode !== 402) {
           throw new Error(result.body.error || result.body.message || `Processing failed with status ${result.statusCode}`);
         }
         await client.query(
-          `UPDATE webhook_queue SET status = 'completed', processed_at = NOW(), error_message = NULL WHERE id = $1`,
+          `UPDATE webhook_queue SET status = 'completed', processed_at = NOW(), updated_at = NOW(), error_message = NULL WHERE id = $1`,
           [row.id]
         );
         processed++;
       } catch (err: any) {
         errors++;
-        const nextAttempts = (row.attempts || 0) + 1;
+        const nextAttempts = (row.attempts || 0);
         const nextStatus = nextAttempts >= 5 ? 'failed' : 'pending';
         await client.query(
-          `UPDATE webhook_queue SET status = $1, error_message = $2 WHERE id = $3`,
+          `UPDATE webhook_queue SET status = $1, error_message = $2, updated_at = NOW() WHERE id = $3`,
           [nextStatus, err.message, row.id]
         );
         try {

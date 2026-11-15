@@ -114,9 +114,16 @@ export async function onboardingRoutes(fastify: FastifyInstance): Promise<void> 
         });
       }
 
+      const useLiveGateway =
+        process.env.ZATCA_USE_LIVE_GATEWAY === 'true' ||
+        Boolean(process.env.ZATCA_PORTAL_OTP && parseResult.data.otp === process.env.ZATCA_PORTAL_OTP);
+
+      const environment = (egsCheck.rows[0].csid_environment as any) || 'sandbox';
       const mockCertPem = process.env.ZATCA_SANDBOX_CERT_PEM || egsCheck.rows[0].certificate;
 
-      const apiClient = new MockZatcaApiClient(mockCertPem || '');
+      const apiClient = useLiveGateway
+        ? new LiveZatcaApiClient(environment)
+        : new MockZatcaApiClient(mockCertPem || '');
 
       const result = await renewProductionCsid(client, id, parseResult.data.otp, workDir, apiClient);
 

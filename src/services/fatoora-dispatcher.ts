@@ -215,15 +215,51 @@ export async function submitInvoiceToFatoora(
     };
   }
 
-  // 2. Recovery on HTTP 409 Duplicate UUID
+  // 2. Recovery on Duplicate UUID (HTTP 208 Already Reported / HTTP 409)
   if (verdict.kind === 'duplicate_uuid_recovered') {
     const recoveryStatus = isB2B ? 'cleared' : 'reported';
+    const responseData = verdict.data || {};
+    let finalClearedXml = row.cleared_xml || null;
+    let finalQrCode = row.qr_code_payload;
+
+    if (responseData.clearedInvoice) {
+      finalClearedXml = Buffer.from(responseData.clearedInvoice, 'base64').toString('utf8');
+      const qrMatch = finalClearedXml.match(/<cbc:EmbeddedDocumentBinaryObject[^>]*mimeCode="text\/plain"[^>]*>([^<]+)<\/cbc:EmbeddedDocumentBinaryObject>/);
+      if (qrMatch) {
+        finalQrCode = qrMatch[1].trim();
+      } else if (responseData.qrCode) {
+        finalQrCode = responseData.qrCode;
+      }
+    } else if (responseData.qrCode) {
+      finalQrCode = responseData.qrCode;
+    }
+
+    if (isB2B && !finalClearedXml) {
+      await client.query(
+        `UPDATE invoices
+         SET status = 'rejected',
+             warning_messages = jsonb_build_object('error', 'ZATCA duplicate clearance response missing clearedInvoice XML payload'),
+             updated_at = NOW()
+         WHERE id = $1`,
+        [invoiceId]
+      );
+      return {
+        invoiceId,
+        invoiceUuid: row.uuid,
+        status: 'rejected',
+        httpStatus: httpResponse.statusCode,
+        message: 'ZATCA duplicate clearance missing clearedInvoice payload'
+      };
+    }
+
     await client.query(
       `UPDATE invoices
        SET status = $1,
+           cleared_xml = COALESCE($2, cleared_xml),
+           qr_code_payload = COALESCE($3, qr_code_payload),
            updated_at = NOW()
-       WHERE id = $2`,
-      [recoveryStatus, invoiceId]
+       WHERE id = $4`,
+      [recoveryStatus, finalClearedXml, finalQrCode, invoiceId]
     );
 
     await client.query(
@@ -233,11 +269,24 @@ export async function submitInvoiceToFatoora(
       [invoiceId]
     );
 
+    // Notify Salla order timeline with the verified invoice link
+    await notifySallaOrderTimeline(
+      client,
+      row.merchant_id,
+      row.order_id,
+      row.uuid,
+      options.sallaApiBase,
+      options.appBaseUrl,
+      options.customFetch
+    );
+
     return {
       invoiceId,
       invoiceUuid: row.uuid,
       status: 'duplicate_recovered',
-      httpStatus: 409,
+      httpStatus: httpResponse.statusCode,
+      clearedXml: finalClearedXml,
+      qrCode: finalQrCode,
       message: verdict.message
     };
   }

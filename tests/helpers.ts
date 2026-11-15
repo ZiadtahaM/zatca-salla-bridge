@@ -1217,12 +1217,12 @@ export function attachStatefulRelationalTestDb(pool: any): void {
       return { rows, rowCount: rows.length };
     }
 
-    if (normalized.includes('UPDATE invoices SET status = $1, cleared_xml = $2')) {
+    if (normalized.includes('UPDATE invoices SET status = $1') && normalized.includes('cleared_xml =')) {
       const inv = invoices.find((i) => i.id === params[3]);
       if (inv) {
         inv.status = params[0];
-        inv.cleared_xml = params[1];
-        inv.qr_code_payload = params[2];
+        inv.cleared_xml = params[1] || inv.cleared_xml;
+        inv.qr_code_payload = params[2] || inv.qr_code_payload;
         const warningMatch = sql.match(/jsonb_build_object\s*\(\s*'error'\s*,\s*'([^']+)'\s*\)/i);
         if (warningMatch) {
           inv.warning_messages = { error: warningMatch[1] };

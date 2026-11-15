@@ -1,7 +1,7 @@
 import { PoolClient, Pool } from 'pg';
 import { generateZatcaCsr, CsrInput, ZatcaEnvironment, getZatcaBaseUrl } from './csr-generator.js';
 import { extractX509Metadata } from '../crypto/zatca-signer.js';
-import { encryptVaultSecret } from '../crypto/vault.js';
+import { encryptVaultSecret, decryptVaultSecret } from '../crypto/vault.js';
 import { generateComplianceDocumentSet } from './invoice-generator.js';
 import { X509Certificate } from 'node:crypto';
 import { rmSync } from 'node:fs';
@@ -90,7 +90,7 @@ export class MockZatcaApiClient implements ZatcaApiClient {
     };
   }
 
-  async renewCsid(_csrBase64: string, _otp: string) {
+  async renewCsid(_csrBase64: string, _otp: string, _token?: string, _secret?: string) {
     const cleanCert = this.mockCertPem
       .replace(/-----BEGIN CERTIFICATE-----/g, '')
       .replace(/-----END CERTIFICATE-----/g, '')
@@ -448,11 +448,20 @@ export async function renewProductionCsid(
 
   const { privateKeyPem, csrBase64 } = generateZatcaCsr(workDir, csrInput);
 
+  const cleanCert = (unit.certificate || '')
+    .replace(/-----BEGIN CERTIFICATE-----/g, '')
+    .replace(/-----END CERTIFICATE-----/g, '')
+    .replace(/\s+/g, '');
+
+  const decryptedSecret = unit.csid_secret && unit.csid_secret.startsWith('v1:')
+    ? decryptVaultSecret(unit.csid_secret)
+    : unit.csid_secret;
+
   let renewRes: { binarySecurityToken: string; secret: string };
   if (apiClient.renewCsid) {
-    renewRes = await apiClient.renewCsid(csrBase64, otp, unit.certificate, unit.csid_secret);
+    renewRes = await apiClient.renewCsid(csrBase64, otp, cleanCert, decryptedSecret);
   } else {
-    renewRes = await apiClient.requestProductionCsid('RENEW', unit.certificate, unit.csid_secret);
+    renewRes = await apiClient.requestProductionCsid('RENEW', cleanCert, decryptedSecret);
   }
 
   const wrappedCertBase64 = (renewRes.binarySecurityToken.replace(/\s+/g, '').match(/.{1,64}/g) || []).join('\n');

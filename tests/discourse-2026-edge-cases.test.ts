@@ -19,7 +19,7 @@ import { attachStatefulRelationalTestDb, generateValidSecp256k1TestCert } from '
 import { encryptVaultSecret } from '../src/crypto/vault.js';
 import { submitInvoiceToFatoora } from '../src/services/fatoora-dispatcher.js';
 import { classifyGatewayResponse } from '../src/services/outage-classifier.js';
-import { MockZatcaApiClient, LiveZatcaApiClient } from '../src/services/onboarding-service.js';
+import { MockZatcaApiClient, LiveZatcaApiClient, renewProductionCsid } from '../src/services/onboarding-service.js';
 import { Pool } from 'pg';
 
 function createBaseMockOrder(): SallaOrderData {
@@ -1627,7 +1627,7 @@ test('Discourse Edge Case 19: B2B Clearance Missing clearedInvoice Fails Closed 
   }
 });
 
-test('Discourse Edge Case 20: classifyGatewayResponse Handles HTTP 208 and Already Cleared Duplicate Recovery', () => {
+test('Discourse Edge Case 20: HTTP 208 Duplicate B2B Clearance Saves Returned XML and QR Code', async () => {
   const verdict208 = classifyGatewayResponse({
     statusCode: 208,
     headers: { 'content-type': 'application/json' },
@@ -1643,10 +1643,118 @@ test('Discourse Edge Case 20: classifyGatewayResponse Handles HTTP 208 and Alrea
   });
   assert.equal(verdictText.kind, 'duplicate_uuid_recovered');
   assert.ok(verdictText.message.includes('already recorded'));
+
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
+  try {
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase20');
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const encSec = encryptVaultSecret('sec_test_edge20');
+
+    await client.query(
+      `INSERT INTO merchant_tokens (
+        merchant_id, store_name, vat_number, crn, access_token_encrypted, refresh_token_encrypted, expires_at
+      ) VALUES (
+        'salla_demo_store', 'متجر سلة التجريبي', '300075588700003', '1010010000', $1, $2, NOW() + INTERVAL '30 days'
+      ) ON CONFLICT (merchant_id) DO UPDATE SET
+        store_name = EXCLUDED.store_name,
+        vat_number = EXCLUDED.vat_number,
+        crn = EXCLUDED.crn`,
+      [encryptVaultSecret('demo_token'), encryptVaultSecret('demo_refresh')]
+    );
+
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        'salla_demo_store', 'main', 'EGS-DISCOURSE-EDGE20', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '365 days', TRUE, 15, 'INITIAL_HASH_EDGE20',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge20', 'IOS-POS'
+      ) RETURNING id`,
+      [encKey, certPem, encSec]
+    );
+    const egsId = egsRes.rows[0].id;
+
+    const b2bOrder: SallaOrderData = {
+      ...createBaseMockOrder(),
+      id: 99402,
+      customer: {
+        id: 702,
+        first_name: 'شركة',
+        last_name: 'الصناعات الحديثة',
+        mobile: '+966508888888',
+        email: 'info@modern-ind.sa',
+        tax_number: '300098765400003'
+      },
+      shipping: {
+        address: {
+          country: 'SA',
+          country_code: 'SA',
+          city: 'الرياض',
+          district: 'الملز',
+          street: 'شارع صلاح الدين',
+          postal_code: '12831',
+          building_number: '5678'
+        }
+      }
+    };
+
+    const b2bDoc = await processSallaOrderIntoZatcaInvoice(client, egsId, b2bOrder, 'idemp_b2b_clear_208_01');
+    assert.equal(b2bDoc.isB2C, false, 'Document must be classified as B2B tax invoice');
+
+    // Mock cleared XML containing ZATCA stamp & QR code
+    const mockClearedXml = `<Invoice><cbc:ID>INV-99402</cbc:ID><cac:AdditionalDocumentReference><cbc:ID>QR</cbc:ID><cac:Attachment><cbc:EmbeddedDocumentBinaryObject mimeCode="text/plain">MOCK_CLEARED_QR_PAYLOAD_208</cbc:EmbeddedDocumentBinaryObject></cac:Attachment></cac:AdditionalDocumentReference></Invoice>`;
+    const mockClearedBase64 = Buffer.from(mockClearedXml, 'utf8').toString('base64');
+
+    // Simulate ZATCA returning HTTP 208 with clearedInvoice and QR code
+    const mockHttpClient208 = async () => ({
+      statusCode: 208,
+      headers: { 'content-type': 'application/json' },
+      rawBody: JSON.stringify({
+        clearanceStatus: 'CLEARED',
+        clearedInvoice: mockClearedBase64,
+        qrCode: 'MOCK_CLEARED_QR_PAYLOAD_208'
+      })
+    });
+
+    let sallaTimelineCalled = false;
+    const mockCustomFetch = async (_url: any, _init: any) => {
+      sallaTimelineCalled = true;
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+
+    const dispatchResult = await submitInvoiceToFatoora(client, b2bDoc.invoiceId, {
+      httpClient: mockHttpClient208,
+      customFetch: mockCustomFetch as any
+    });
+
+    assert.equal(dispatchResult.status, 'duplicate_recovered');
+    assert.equal(dispatchResult.httpStatus, 208);
+    assert.ok(dispatchResult.clearedXml?.includes('INV-99402'), 'Must return parsed cleared XML');
+    assert.equal(dispatchResult.qrCode, 'MOCK_CLEARED_QR_PAYLOAD_208', 'Must extract and return cleared QR payload');
+    assert.equal(sallaTimelineCalled, true, 'Must notify Salla timeline upon duplicate recovery');
+
+    const invoiceCheck = await client.query(`SELECT status, cleared_xml, qr_code_payload FROM invoices WHERE id = $1`, [b2bDoc.invoiceId]);
+    assert.equal(invoiceCheck.rows[0].status, 'cleared', 'Invoice status must be updated to cleared');
+    assert.ok(invoiceCheck.rows[0].cleared_xml?.includes('INV-99402'), 'cleared_xml must be persisted in database');
+    assert.equal(invoiceCheck.rows[0].qr_code_payload, 'MOCK_CLEARED_QR_PAYLOAD_208', 'qr_code_payload must be persisted in database');
+  } finally {
+    client.release();
+    await pool.end();
+  }
 });
 
-test('Discourse Edge Case 21: CSID Renewal Dynamic Gateway Selection Respects ZATCA_USE_LIVE_GATEWAY', () => {
+test('Discourse Edge Case 21: CSID Renewal Sanitizes Certificate and Decrypts CSID Secret', async () => {
   const originalEnv = process.env.ZATCA_USE_LIVE_GATEWAY;
+  const pool = new Pool();
+  attachStatefulRelationalTestDb(pool);
+  const client = await pool.connect();
+
   try {
     process.env.ZATCA_USE_LIVE_GATEWAY = 'true';
     const useLive = process.env.ZATCA_USE_LIVE_GATEWAY === 'true';
@@ -1657,11 +1765,69 @@ test('Discourse Edge Case 21: CSID Renewal Dynamic Gateway Selection Respects ZA
     const useMock = process.env.ZATCA_USE_LIVE_GATEWAY === 'true';
     const clientMock = useMock ? new LiveZatcaApiClient('sandbox') : new MockZatcaApiClient('');
     assert.ok(clientMock instanceof MockZatcaApiClient, 'Must fallback to MockZatcaApiClient when ZATCA_USE_LIVE_GATEWAY is false');
+
+    const certDir = join(process.cwd(), '.zatca-test-keys-edgecase21');
+    const { certPem, privateKeyPem } = generateValidSecp256k1TestCert(certDir);
+    const encKey = encryptVaultSecret(privateKeyPem);
+    const plainSecret = 'super_secret_zatca_pass_2026';
+    const encSec = encryptVaultSecret(plainSecret);
+
+    const egsRes = await client.query(
+      `INSERT INTO egs_units (
+        merchant_id, branch_id, custom_id, private_key_pem, certificate,
+        csid_secret, csid_environment, expires_at, is_active, current_icv, last_document_hash,
+        public_key_bytes, ca_signature_bytes, certificate_hash, egs_uuid, model
+      ) VALUES (
+        'salla_demo_store', 'main', 'EGS-DISCOURSE-EDGE21', $1, $2,
+        $3, 'sandbox', NOW() + INTERVAL '30 days', TRUE, 5, 'INITIAL_HASH_EDGE21',
+        'pub_bytes', 'sig_bytes', 'cert_hash', 'egs-uuid-edge21', 'IOS-POS'
+      ) RETURNING id`,
+      [encKey, certPem, encSec]
+    );
+    const egsId = egsRes.rows[0].id;
+
+    let receivedToken = '';
+    let receivedSecret = '';
+
+    const mockRenewalClient = {
+      async renewCsid(_csr: string, _otp: string, token: string, secret: string) {
+        receivedToken = token;
+        receivedSecret = secret;
+        const cleanCert = certPem
+          .replace(/-----BEGIN CERTIFICATE-----/g, '')
+          .replace(/-----END CERTIFICATE-----/g, '')
+          .replace(/\s+/g, '');
+        return {
+          requestID: 'REQ-RENEW-TEST-21',
+          binarySecurityToken: cleanCert,
+          secret: 'new_renewed_secret_456'
+        };
+      }
+    };
+
+    const workDir = join(process.cwd(), '.zatca-test-renew-edge21');
+    const result = await renewProductionCsid(client, egsId, '123456', workDir, mockRenewalClient as any);
+
+    assert.ok(result.egsUnitId === egsId);
+    assert.equal(result.currentIcv, 5, 'Preserves current_icv');
+
+    // Crucial credential assertions
+    assert.ok(!receivedToken.includes('BEGIN CERTIFICATE'), 'Token must not contain PEM header');
+    assert.ok(!receivedToken.includes('END CERTIFICATE'), 'Token must not contain PEM footer');
+    assert.ok(!receivedToken.includes('\n'), 'Token must not contain newlines');
+    assert.equal(receivedSecret, plainSecret, 'Secret must be decrypted to plaintext before API call');
+    assert.ok(!receivedSecret.startsWith('v1:'), 'Secret must not be raw encrypted vault envelope');
+
+    // Verify DB updated with newly encrypted secret
+    const updatedEgs = await client.query(`SELECT csid_secret FROM egs_units WHERE id = $1`, [egsId]);
+    assert.ok(updatedEgs.rows[0].csid_secret.startsWith('v1:'), 'New secret must be re-encrypted in database');
   } finally {
     if (originalEnv !== undefined) {
       process.env.ZATCA_USE_LIVE_GATEWAY = originalEnv;
     } else {
       delete process.env.ZATCA_USE_LIVE_GATEWAY;
     }
+    client.release();
+    await pool.end();
   }
 });
